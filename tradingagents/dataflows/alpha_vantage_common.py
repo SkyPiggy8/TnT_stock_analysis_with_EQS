@@ -1,4 +1,5 @@
 import os
+import re
 import requests
 import pandas as pd
 import json
@@ -52,6 +53,17 @@ class AlphaVantageRateLimitError(Exception):
     """Exception raised when Alpha Vantage API rate limit is exceeded."""
     pass
 
+
+class AlphaVantageUnavailableError(Exception):
+    """Exception raised when Alpha Vantage reports an unavailable endpoint."""
+    pass
+
+
+def _redact_sensitive_url(text: str) -> str:
+    """Remove secrets from exception text before it reaches logs or agents."""
+    return re.sub(r"([?&]apikey=)[^&\s)]+", r"\1<redacted>", str(text))
+
+
 def _make_api_request(function_name: str, params: dict) -> dict | str:
     """Helper function to make API requests and handle responses.
     
@@ -76,19 +88,33 @@ def _make_api_request(function_name: str, params: dict) -> dict | str:
         # Remove entitlement if it's None or empty
         api_params.pop("entitlement", None)
     
-    response = requests.get(API_BASE_URL, params=api_params)
-    response.raise_for_status()
+    try:
+        response = requests.get(API_BASE_URL, params=api_params)
+        response.raise_for_status()
+    except requests.exceptions.RequestException as exc:
+        message = _redact_sensitive_url(str(exc))
+        raise AlphaVantageUnavailableError(
+            f"Alpha Vantage request unavailable for {function_name}: {message}"
+        ) from exc
 
     response_text = response.text
     
     # Check if response is JSON (error responses are typically JSON)
     try:
         response_json = json.loads(response_text)
-        # Check for rate limit error
+        # Check for vendor-side errors before CSV callers try to parse the
+        # JSON response as market data.
         if "Information" in response_json:
             info_message = response_json["Information"]
-            if "rate limit" in info_message.lower() or "api key" in info_message.lower():
+            info_lower = info_message.lower()
+            if "rate limit" in info_lower or "api key" in info_lower:
                 raise AlphaVantageRateLimitError(f"Alpha Vantage rate limit exceeded: {info_message}")
+            if "premium endpoint" in info_lower or "premium plan" in info_lower:
+                raise AlphaVantageUnavailableError(f"Alpha Vantage endpoint unavailable: {info_message}")
+        if "Error Message" in response_json:
+            raise AlphaVantageUnavailableError(
+                f"Alpha Vantage request failed: {response_json['Error Message']}"
+            )
     except json.JSONDecodeError:
         # Response is not JSON (likely CSV data), which is normal
         pass

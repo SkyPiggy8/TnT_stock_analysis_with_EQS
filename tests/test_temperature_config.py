@@ -67,6 +67,30 @@ class TestProviderKwargsTemperature:
         graph.config = {"llm_provider": "openai", "temperature": temperature}
         return TradingAgentsGraph._get_provider_kwargs(graph)
 
+    def _kwargs_for_network(self, timeout=None, max_retries=None):
+        from tradingagents.graph.trading_graph import TradingAgentsGraph
+        graph = TradingAgentsGraph.__new__(TradingAgentsGraph)
+        graph.config = {
+            "llm_provider": "openai",
+            "temperature": None,
+            "llm_timeout": timeout,
+            "llm_max_retries": max_retries,
+            "llm_trust_env": True,
+        }
+        return TradingAgentsGraph._get_provider_kwargs(graph)
+
+    def _kwargs_for_trust_env(self, trust_env, provider="openai"):
+        from tradingagents.graph.trading_graph import TradingAgentsGraph
+        graph = TradingAgentsGraph.__new__(TradingAgentsGraph)
+        graph.config = {
+            "llm_provider": provider,
+            "temperature": None,
+            "llm_timeout": "180",
+            "llm_max_retries": None,
+            "llm_trust_env": trust_env,
+        }
+        return TradingAgentsGraph._get_provider_kwargs(graph)
+
     def test_float_string_coerced(self):
         assert self._kwargs_for("0.3")["temperature"] == 0.3
 
@@ -78,3 +102,23 @@ class TestProviderKwargsTemperature:
 
     def test_empty_string_omitted(self):
         assert "temperature" not in self._kwargs_for("")
+
+    def test_network_settings_forwarded_and_coerced(self):
+        kwargs = self._kwargs_for_network(timeout="180", max_retries="5")
+        assert kwargs["timeout"] == 180.0
+        assert kwargs["max_retries"] == 5
+
+    def test_empty_network_settings_omitted(self):
+        kwargs = self._kwargs_for_network(timeout="", max_retries="")
+        assert "timeout" not in kwargs
+        assert "max_retries" not in kwargs
+
+    def test_trust_env_false_adds_openai_http_clients(self):
+        kwargs = self._kwargs_for_trust_env(False)
+        assert kwargs["http_client"]._trust_env is False
+        assert kwargs["http_async_client"]._trust_env is False
+
+    def test_trust_env_true_omits_custom_http_clients(self):
+        kwargs = self._kwargs_for_trust_env(True)
+        assert "http_client" not in kwargs
+        assert "http_async_client" not in kwargs

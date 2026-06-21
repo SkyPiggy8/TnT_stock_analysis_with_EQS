@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>TradingAgents Quant Console</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="rail">
+        <div class="brand">
+          <span class="brand-mark"></span>
+          <div>
+            <strong>TnT Quant</strong>
+            <span>A-share intelligence console</span>
+          </div>
+        </div>
+
+        <section class="control-block">
+          <label for="reportSelect">历史报告</label>
+          <select id="reportSelect"></select>
+        </section>
+
+        <section class="control-block grid-2">
+          <div>
+            <label for="tickerInput">股票代码</label>
+            <input id="tickerInput" autocomplete="off" placeholder="600219.SH" />
+          </div>
+          <div>
+            <label for="dateInput">分析日期</label>
+            <input id="dateInput" type="date" />
+          </div>
+        </section>
+
+        <button id="runQuantBtn" class="primary-action" type="button">
+          生成实时量化策略
+        </button>
+        <button id="refreshFundamentalsBtn" class="secondary-action" type="button">
+          刷新财务快照
+        </button>
+
+        <div id="statusLine" class="status-line">初始化中</div>
+
+        <section class="mini-panel">
+          <span>数据源状态</span>
+          <dl>
+            <div><dt>Report</dt><dd id="sourceReport">-</dd></div>
+            <div><dt>Quant</dt><dd id="sourceQuant">-</dd></div>
+            <div><dt>Financials</dt><dd id="sourceFundamentals">-</dd></div>
+            <div><dt>Log</dt><dd id="sourceLog">-</dd></div>
+          </dl>
+        </section>
+      </aside>
+
+      <main class="workspace">
+        <header class="topline">
+          <div>
+            <p class="eyebrow">TradingAgents Local Dashboard</p>
+            <h1 id="pageTitle">A股策略监控台</h1>
+          </div>
+          <div class="headline-meta">
+            <span id="analysisDate">-</span>
+            <span id="decisionBadge" class="badge neutral">UNKNOWN</span>
+          </div>
+        </header>
+
+        <section class="metric-strip">
+          <article>
+            <span>量化信号</span>
+            <strong id="metricQuantSignal">-</strong>
+            <small id="metricReason">等待数据</small>
+          </article>
+          <article>
+            <span>Day 0</span>
+            <strong id="metricDay0">-</strong>
+            <small id="metricNetInflow">净流入 -</small>
+          </article>
+          <article>
+            <span>止盈 / 风险线</span>
+            <strong id="metricLevels">-</strong>
+            <small id="metricLatestClose">最新收盘 -</small>
+          </article>
+          <article>
+            <span>主报告建议</span>
+            <strong id="metricDecision">-</strong>
+            <small id="metricModified">-</small>
+          </article>
+        </section>
+
+        <section class="visual-grid">
+          <article class="panel chart-panel">
+            <div class="panel-head">
+              <div>
+                <h2>资金异动监控</h2>
+                <p>净流入、10日均额、价格线</p>
+              </div>
+              <span id="chartBadge" class="badge neutral">NO DATA</span>
+            </div>
+            <canvas id="flowChart" width="920" height="360"></canvas>
+          </article>
+
+          <article class="panel policy-panel">
+            <div class="panel-head">
+              <div>
+                <h2>政策与事件</h2>
+                <p>报告中的新闻、基本面与情绪摘要</p>
+              </div>
+            </div>
+            <div id="policyDigest" class="digest-list"></div>
+          </article>
+        </section>
+
+        <section class="panel fundamentals-panel">
+          <div class="panel-head">
+            <div>
+              <h2>财务质量与估值</h2>
+              <p id="fundamentalSubtitle">Tushare 财务报表与每日估值</p>
+            </div>
+            <span id="fundamentalBadge" class="badge neutral">LOADING</span>
+          </div>
+
+          <div class="fundamental-metrics">
+            <div>
+              <span>营业收入</span>
+              <strong id="fundRevenue">-</strong>
+              <small id="fundRevenueYoy">同比 -</small>
+            </div>
+            <div>
+              <span>归母净利润</span>
+              <strong id="fundNetProfit">-</strong>
+              <small id="fundProfitYoy">同比 -</small>
+            </div>
+            <div>
+              <span>ROE / 毛利率</span>
+              <strong id="fundReturns">-</strong>
+              <small id="fundNetMargin">净利率 -</small>
+            </div>
+            <div>
+              <span>经营现金流</span>
+              <strong id="fundCashFlow">-</strong>
+              <small id="fundCashQuality">现金质量 -</small>
+            </div>
+            <div>
+              <span>资产负债率</span>
+              <strong id="fundDebtRatio">-</strong>
+              <small id="fundCurrentRatio">流动比率 -</small>
+            </div>
+            <div>
+              <span>PE (TTM) / PB</span>
+              <strong id="fundValuation">-</strong>
+              <small id="fundValuationDate">估值日 -</small>
+            </div>
+          </div>
+
+          <div class="fundamental-visuals">
+            <canvas id="fundamentalChart" width="920" height="340"></canvas>
+            <div id="fundamentalSummary" class="fundamental-summary"></div>
+          </div>
+        </section>
+
+        <section class="panel report-panel">
+          <div class="tabbar" id="tabbar">
+            <button class="tab active" data-section="complete" type="button">总报告</button>
+            <button class="tab" data-section="quant" type="button">量化策略</button>
+            <button class="tab" data-section="market" type="button">行情</button>
+            <button class="tab" data-section="news" type="button">新闻政策</button>
+            <button class="tab" data-section="fundamentals" type="button">基本面</button>
+            <button class="tab" data-section="sentiment" type="button">情绪</button>
+            <button class="tab" data-section="portfolio" type="button">组合决策</button>
+            <button class="tab" data-section="fetchLog" type="button">抓取日志</button>
+          </div>
+          <div id="reportContent" class="markdown-view"></div>
+        </section>
+      </main>
+    </div>
+
+    <script src="/app.js"></script>
+  </body>
+</html>

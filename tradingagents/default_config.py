@@ -18,6 +18,22 @@ _ENV_OVERRIDES = {
     "TRADINGAGENTS_CHECKPOINT_ENABLED":   "checkpoint_enabled",
     "TRADINGAGENTS_BENCHMARK_TICKER":     "benchmark_ticker",
     "TRADINGAGENTS_TEMPERATURE":          "temperature",
+    "TRADINGAGENTS_LLM_TIMEOUT":          "llm_timeout",
+    "TRADINGAGENTS_LLM_MAX_RETRIES":      "llm_max_retries",
+    "TRADINGAGENTS_LLM_TRUST_ENV":        "llm_trust_env",
+    "TRADINGAGENTS_AKSHARE_TRUST_ENV":    "akshare_trust_env",
+}
+_ENV_OVERRIDE_TYPES = {
+    "llm_timeout": float,
+    "llm_max_retries": int,
+}
+
+_DATA_VENDOR_ALL_ENV = "TRADINGAGENTS_DATA_VENDOR"
+_DATA_VENDOR_ENV_OVERRIDES = {
+    "TRADINGAGENTS_CORE_STOCK_VENDOR":          "core_stock_apis",
+    "TRADINGAGENTS_TECHNICAL_INDICATORS_VENDOR": "technical_indicators",
+    "TRADINGAGENTS_FUNDAMENTAL_DATA_VENDOR":    "fundamental_data",
+    "TRADINGAGENTS_NEWS_DATA_VENDOR":           "news_data",
 }
 
 
@@ -32,13 +48,29 @@ def _coerce(value: str, reference):
     return value
 
 
+def _coerce_config_value(key: str, value: str, reference):
+    explicit_type = _ENV_OVERRIDE_TYPES.get(key)
+    if explicit_type is not None:
+        return explicit_type(value)
+    return _coerce(value, reference)
+
+
 def _apply_env_overrides(config: dict) -> dict:
     """Apply TRADINGAGENTS_* env vars to the config dict in-place."""
     for env_var, key in _ENV_OVERRIDES.items():
         raw = os.environ.get(env_var)
         if raw is None or raw == "":
             continue
-        config[key] = _coerce(raw, config.get(key))
+        config[key] = _coerce_config_value(key, raw, config.get(key))
+    all_vendor = os.environ.get(_DATA_VENDOR_ALL_ENV)
+    if all_vendor:
+        for key in config["data_vendors"]:
+            config["data_vendors"][key] = all_vendor
+    for env_var, key in _DATA_VENDOR_ENV_OVERRIDES.items():
+        raw = os.environ.get(env_var)
+        if raw is None or raw == "":
+            continue
+        config["data_vendors"][key] = raw
     return config
 
 
@@ -70,6 +102,18 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # variation on models that honor it; reasoning models largely ignore it
     # and no setting makes LLM output bit-identical across runs (see README).
     "temperature": None,
+    # Network controls for LLM calls. These are forwarded to the underlying
+    # provider client when set; leave them None to use provider defaults.
+    "llm_timeout": None,
+    "llm_max_retries": None,
+    # When False, OpenAI-compatible LLM clients ignore HTTP_PROXY/HTTPS_PROXY
+    # and other process-level proxy env vars. Useful when a local terminal
+    # proxy is misconfigured and causes TLS "wrong version number" errors.
+    "llm_trust_env": True,
+    # AKShare/EastMoney data calls often fail behind a stale terminal proxy.
+    # Keep direct requests as the default; set TRADINGAGENTS_AKSHARE_TRUST_ENV=true
+    # if your network requires a proxy for AKShare.
+    "akshare_trust_env": False,
     # Checkpoint/resume: when True, LangGraph saves state after each node
     # so a crashed run can resume from the last successful step.
     "checkpoint_enabled": False,
@@ -99,10 +143,10 @@ DEFAULT_CONFIG = _apply_env_overrides({
     # Data vendor configuration
     # Category-level configuration (default for all tools in category)
     "data_vendors": {
-        "core_stock_apis": "yfinance",       # Options: alpha_vantage, yfinance
-        "technical_indicators": "yfinance",  # Options: alpha_vantage, yfinance
-        "fundamental_data": "yfinance",      # Options: alpha_vantage, yfinance
-        "news_data": "yfinance",             # Options: alpha_vantage, yfinance
+        "core_stock_apis": "tushare,akshare,yfinance",       # Options: alpha_vantage, yfinance, tushare, akshare
+        "technical_indicators": "tushare,akshare,yfinance",  # Options: alpha_vantage, yfinance, tushare, akshare
+        "fundamental_data": "tushare,yfinance",  # A-shares use Tushare; other markets use yfinance
+        "news_data": "akshare_news,yfinance",  # Options: alpha_vantage, yfinance, akshare_news
     },
     # Tool-level configuration (takes precedence over category-level)
     "tool_vendors": {

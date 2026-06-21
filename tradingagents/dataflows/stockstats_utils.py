@@ -14,6 +14,28 @@ from .symbol_utils import normalize_symbol, NoMarketDataError
 logger = logging.getLogger(__name__)
 
 
+_A_SHARE_SUFFIXES = (".SZ", ".SS", ".SH", ".BJ")
+
+
+def _is_a_share_ticker(ticker: str) -> bool:
+    if not isinstance(ticker, str):
+        return False
+    upper = ticker.strip().upper()
+    if upper.isdigit() and len(upper) == 6:
+        return True
+    return (
+        len(upper) == 9
+        and upper[:6].isdigit()
+        and upper.endswith(_A_SHARE_SUFFIXES)
+    )
+
+
+def _configured_vendors(category: str) -> list[str]:
+    config = get_config()
+    vendor_config = config.get("data_vendors", {}).get(category, "")
+    return [vendor.strip() for vendor in vendor_config.split(",") if vendor.strip()]
+
+
 def yf_retry(func, max_retries=3, base_delay=2.0):
     """Execute a yfinance call with exponential backoff on rate limits.
 
@@ -69,6 +91,27 @@ def load_ohlcv(symbol: str, curr_date: str) -> pd.DataFrame:
     subsequent calls the cache is reused. Rows after curr_date are
     filtered out so backtests never see future prices.
     """
+    if _is_a_share_ticker(symbol):
+        vendors = _configured_vendors("core_stock_apis")
+        curr_date_dt = pd.to_datetime(curr_date)
+        start_date = curr_date_dt - pd.DateOffset(years=5)
+        if "tushare" in vendors:
+            from .tushare_data import _load_tushare_ohlcv
+
+            return _load_tushare_ohlcv(
+                symbol,
+                start_date.strftime("%Y-%m-%d"),
+                curr_date_dt.strftime("%Y-%m-%d"),
+            )
+        if "akshare" in vendors:
+            from .akshare_data import _load_akshare_ohlcv
+
+            return _load_akshare_ohlcv(
+                symbol,
+                start_date.strftime("%Y-%m-%d"),
+                curr_date_dt.strftime("%Y-%m-%d"),
+            )
+
     # Resolve broker/forex symbols (XAUUSD+ -> GC=F) to Yahoo's convention,
     # then reject values that would escape the cache directory when
     # interpolated into the cache filename (e.g. ``../../tmp/x``).

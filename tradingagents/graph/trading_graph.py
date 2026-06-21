@@ -32,6 +32,7 @@ from tradingagents.agents.utils.agent_utils import (
     resolve_instrument_identity,
     get_stock_data,
     get_indicators,
+    get_verified_market_snapshot,
     get_fundamentals,
     get_balance_sheet,
     get_cashflow,
@@ -47,6 +48,21 @@ from .setup import GraphSetup
 from .propagation import Propagator
 from .reflection import Reflector
 from .signal_processing import SignalProcessor
+
+
+_OPENAI_COMPATIBLE_PROVIDERS = {
+    "openai",
+    "xai",
+    "deepseek",
+    "qwen",
+    "qwen-cn",
+    "glm",
+    "glm-cn",
+    "minimax",
+    "minimax-cn",
+    "ollama",
+    "openrouter",
+}
 
 
 class TradingAgentsGraph:
@@ -162,6 +178,26 @@ class TradingAgentsGraph:
         if temperature is not None and temperature != "":
             kwargs["temperature"] = float(temperature)
 
+        timeout = self.config.get("llm_timeout")
+        if timeout is not None and timeout != "":
+            kwargs["timeout"] = float(timeout)
+
+        max_retries = self.config.get("llm_max_retries")
+        if max_retries is not None and max_retries != "":
+            kwargs["max_retries"] = int(max_retries)
+
+        if (
+            self.config.get("llm_trust_env") is False
+            and provider in _OPENAI_COMPATIBLE_PROVIDERS
+        ):
+            import httpx
+
+            httpx_kwargs = {"trust_env": False}
+            if "timeout" in kwargs:
+                httpx_kwargs["timeout"] = kwargs["timeout"]
+            kwargs["http_client"] = httpx.Client(**httpx_kwargs)
+            kwargs["http_async_client"] = httpx.AsyncClient(**httpx_kwargs)
+
         return kwargs
 
     def _create_tool_nodes(self) -> Dict[str, ToolNode]:
@@ -173,11 +209,13 @@ class TradingAgentsGraph:
                     get_stock_data,
                     # Technical indicators
                     get_indicators,
+                    # Deterministic OHLCV/indicator snapshot
+                    get_verified_market_snapshot,
                 ]
             ),
             "social": ToolNode(
                 [
-                    # News tools for social media analysis
+                    # News tools for event-based sentiment analysis
                     get_news,
                 ]
             ),

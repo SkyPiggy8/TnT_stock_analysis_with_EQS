@@ -1,6 +1,8 @@
-from typing import Optional
+from typing import Any, Optional
 import os
 import datetime
+import json
+import re
 import typer
 import questionary
 from pathlib import Path
@@ -29,6 +31,7 @@ from tradingagents.graph.analyst_execution import (
     sync_analyst_tracker_from_chunk,
 )
 from tradingagents.default_config import DEFAULT_CONFIG
+from tradingagents.dataflows.a_share_quant_strategy import build_quant_strategy_report
 from cli.models import AnalystType
 from cli.utils import *
 from cli.announcements import fetch_announcements, display_announcements
@@ -228,6 +231,185 @@ class MessageBuffer:
             report_parts.append(f"{self.report_sections['final_trade_decision']}")
 
         self.final_report = "\n\n".join(report_parts) if report_parts else None
+
+
+_URL_RE = re.compile(r"https?://[^\s\]\)>'\"，。；]+")
+_SOURCE_HINTS = (
+    "Tushare",
+    "AKShare",
+    "EastMoney",
+    "Yahoo Finance",
+    "yfinance",
+    "Alpha Vantage",
+    "财联社",
+    "同花顺",
+    "东方财富",
+)
+
+
+def _shorten_text(value: Any, limit: int = 2000) -> str:
+    text = "" if value is None else str(value)
+    text = text.strip()
+    if len(text) <= limit:
+        return text
+    return text[: limit - 30].rstrip() + "\n\n... [truncated]"
+
+
+def _safe_json_value(value: Any) -> Any:
+    try:
+        json.dumps(value, ensure_ascii=False)
+        return value
+    except TypeError:
+        return str(value)
+
+
+def extract_fetch_references(text: str) -> dict[str, list[str]]:
+    """Extract source names and URLs from a tool result for audit output."""
+    urls = []
+    for match in _URL_RE.findall(text or ""):
+        url = match.rstrip(".,;")
+        if url not in urls:
+            urls.append(url)
+
+    lowered = (text or "").lower()
+    sources = []
+    for source in _SOURCE_HINTS:
+        if source.lower() in lowered and source not in sources:
+            sources.append(source)
+    return {"urls": urls, "sources": sources}
+
+
+def classify_fetch_status(text: str) -> tuple[str, str]:
+    """Return (status, reason) for a tool result."""
+    content = (text or "").strip()
+    lowered = content.lower()
+    failure_markers = (
+        "data_vendor_unavailable",
+        "no_data_available",
+        "error fetching",
+        "traceback",
+        "<unavailable>",
+        "failed:",
+        "exception",
+    )
+    if not content:
+        return "empty", "Tool returned no text."
+    for marker in failure_markers:
+        if marker in lowered:
+            first_line = content.splitlines()[0] if content.splitlines() else marker
+            return "failed", first_line[:300]
+    return "success", ""
+
+
+class DataFetchAudit:
+    """Collect tool calls and tool results for saved-report traceability."""
+
+    def __init__(self) -> None:
+        self.events: list[dict[str, Any]] = []
+        self._pending_by_id: dict[str, dict[str, Any]] = {}
+        self._sequence = 0
+
+    def record_call(
+        self,
+        tool_name: str,
+        args: Any,
+        *,
+        tool_call_id: str | None = None,
+        timestamp: str | None = None,
+    ) -> None:
+        self._sequence += 1
+        call_id = tool_call_id or f"tool-call-{self._sequence}"
+        event = {
+            "sequence": self._sequence,
+            "timestamp": timestamp or datetime.datetime.now().strftime("%H:%M:%S"),
+            "tool_call_id": call_id,
+            "tool_name": tool_name,
+            "args": _safe_json_value(args),
+            "status": "pending",
+            "sources": [],
+            "urls": [],
+            "result_preview": "",
+            "result_length": 0,
+            "error": "",
+        }
+        self.events.append(event)
+        self._pending_by_id[call_id] = event
+
+    def record_result(
+        self,
+        content: str,
+        *,
+        tool_call_id: str | None = None,
+        timestamp: str | None = None,
+    ) -> None:
+        if tool_call_id and tool_call_id in self._pending_by_id:
+            event = self._pending_by_id.pop(tool_call_id)
+        else:
+            self._sequence += 1
+            event = {
+                "sequence": self._sequence,
+                "timestamp": timestamp or datetime.datetime.now().strftime("%H:%M:%S"),
+                "tool_call_id": tool_call_id or f"tool-result-{self._sequence}",
+                "tool_name": "unknown_tool",
+                "args": {},
+                "status": "pending",
+                "sources": [],
+                "urls": [],
+                "result_preview": "",
+                "result_length": 0,
+                "error": "",
+            }
+            self.events.append(event)
+
+        status, reason = classify_fetch_status(content)
+        refs = extract_fetch_references(content)
+        event.update(
+            {
+                "result_timestamp": timestamp or datetime.datetime.now().strftime("%H:%M:%S"),
+                "status": status,
+                "sources": refs["sources"],
+                "urls": refs["urls"],
+                "result_preview": _shorten_text(content),
+                "result_length": len(content or ""),
+                "error": reason,
+            }
+        )
+
+    def write_to_disk(self, save_path: Path, log_file: Path | None = None) -> Path:
+        log_path = save_path / "data_fetch.log"
+        log_path.write_text(self.to_log_text(), encoding="utf-8")
+        return log_path
+
+    def to_log_text(self) -> str:
+        lines = [
+            "Data Fetch Log",
+            "=" * 14,
+            "",
+            f"Generated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
+            "",
+        ]
+        for event in self.events:
+            urls = ", ".join((event.get("urls") or [])[:5])
+            sources = ", ".join(event.get("sources") or [])
+            error = str(event.get("error") or "").replace("\n", " ")
+            args = json.dumps(event.get("args", {}), ensure_ascii=False)
+            preview = _shorten_text(event.get("result_preview", ""), limit=800)
+            lines.append(
+                f"[{event.get('sequence')}] {event.get('timestamp')} "
+                f"{event.get('tool_name')} - {event.get('status')}"
+            )
+            lines.append(f"args: {args}")
+            if sources:
+                lines.append(f"sources: {sources}")
+            if urls:
+                lines.append(f"urls: {urls}")
+            if error:
+                lines.append(f"error: {error}")
+            if preview:
+                lines.append("summary:")
+                lines.append(preview)
+            lines.append("")
+        return "\n".join(lines).rstrip() + "\n"
 
 
 message_buffer = MessageBuffer()
@@ -695,7 +877,14 @@ def get_analysis_date():
             )
 
 
-def save_report_to_disk(final_state, ticker: str, save_path: Path):
+def save_report_to_disk(
+    final_state,
+    ticker: str,
+    save_path: Path,
+    analysis_date: str | None = None,
+    data_fetch_audit: DataFetchAudit | None = None,
+    source_log_file: Path | None = None,
+):
     """Save complete analysis report to disk with organized subfolders."""
     save_path.mkdir(parents=True, exist_ok=True)
     sections = []
@@ -782,6 +971,16 @@ def save_report_to_disk(final_state, ticker: str, save_path: Path):
     # Write consolidated report
     header = f"# Trading Analysis Report: {ticker}\n\nGenerated: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n\n"
     (save_path / "complete_report.md").write_text(header + "\n\n".join(sections), encoding="utf-8")
+    quant_date = str(
+        analysis_date
+        or final_state.get("trade_date")
+        or final_state.get("analysis_date")
+        or datetime.datetime.now().strftime("%Y-%m-%d")
+    )
+    quant_report = build_quant_strategy_report(ticker, quant_date, final_state)
+    (save_path / "quant_strategy_report.md").write_text(quant_report, encoding="utf-8")
+    if data_fetch_audit is not None:
+        data_fetch_audit.write_to_disk(save_path, source_log_file)
     return save_path / "complete_report.md"
 
 
@@ -1040,6 +1239,7 @@ def run_analysis(checkpoint: bool = False):
     report_dir.mkdir(parents=True, exist_ok=True)
     log_file = results_dir / "message_tool.log"
     log_file.touch(exist_ok=True)
+    data_fetch_audit = DataFetchAudit()
 
     def save_message_decorator(obj, func_name):
         func = getattr(obj, func_name)
@@ -1058,7 +1258,10 @@ def run_analysis(checkpoint: bool = False):
         def wrapper(*args, **kwargs):
             func(*args, **kwargs)
             timestamp, tool_name, args = obj.tool_calls[-1]
-            args_str = ", ".join(f"{k}={v}" for k, v in args.items())
+            if isinstance(args, dict):
+                args_str = ", ".join(f"{k}={v}" for k, v in args.items())
+            else:
+                args_str = str(args)
             with open(log_file, "a", encoding="utf-8") as f:
                 f.write(f"{timestamp} [Tool Call] {tool_name}({args_str})\n")
         return wrapper
@@ -1144,13 +1347,28 @@ def run_analysis(checkpoint: bool = False):
                 msg_type, content = classify_message_type(message)
                 if content and content.strip():
                     message_buffer.add_message(msg_type, content)
+                    if msg_type == "Data":
+                        data_fetch_audit.record_result(
+                            content,
+                            tool_call_id=getattr(message, "tool_call_id", None),
+                        )
 
                 if hasattr(message, "tool_calls") and message.tool_calls:
                     for tool_call in message.tool_calls:
                         if isinstance(tool_call, dict):
-                            message_buffer.add_tool_call(tool_call["name"], tool_call["args"])
+                            tool_name = tool_call["name"]
+                            tool_args = tool_call["args"]
+                            tool_call_id = tool_call.get("id")
                         else:
-                            message_buffer.add_tool_call(tool_call.name, tool_call.args)
+                            tool_name = tool_call.name
+                            tool_args = tool_call.args
+                            tool_call_id = getattr(tool_call, "id", None)
+                        message_buffer.add_tool_call(tool_name, tool_args)
+                        data_fetch_audit.record_call(
+                            tool_name,
+                            tool_args,
+                            tool_call_id=tool_call_id,
+                        )
 
             # Update analyst statuses based on report state (runs on every chunk)
             update_analyst_statuses(
@@ -1273,9 +1491,18 @@ def run_analysis(checkpoint: bool = False):
         ).strip()
         save_path = Path(save_path_str)
         try:
-            report_file = save_report_to_disk(final_state, selections["ticker"], save_path)
+            report_file = save_report_to_disk(
+                final_state,
+                selections["ticker"],
+                save_path,
+                analysis_date=selections["analysis_date"],
+                data_fetch_audit=data_fetch_audit,
+                source_log_file=log_file,
+            )
             console.print(f"\n[green]✓ Report saved to:[/green] {save_path.resolve()}")
             console.print(f"  [dim]Complete report:[/dim] {report_file.name}")
+            console.print("  [dim]Quant strategy report:[/dim] quant_strategy_report.md")
+            console.print("  [dim]Data fetch log:[/dim] data_fetch.log")
         except Exception as e:
             console.print(f"[red]Error saving report: {e}[/red]")
 

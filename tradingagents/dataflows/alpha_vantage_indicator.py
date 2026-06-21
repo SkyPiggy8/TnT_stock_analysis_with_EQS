@@ -1,4 +1,9 @@
-from .alpha_vantage_common import _make_api_request, AlphaVantageNotConfiguredError
+from .alpha_vantage_common import (
+    AlphaVantageNotConfiguredError,
+    AlphaVantageRateLimitError,
+    AlphaVantageUnavailableError,
+    _make_api_request,
+)
 
 def get_indicator(
     symbol: str,
@@ -217,10 +222,13 @@ def get_indicator(
 
         return result_str
 
-    except AlphaVantageNotConfiguredError:
-        # Vendor unavailable (no API key). Let it propagate so the router can
-        # fall back / emit the no-data sentinel instead of returning this as a
-        # successful-looking error string.
+    except (
+        AlphaVantageNotConfiguredError,
+        AlphaVantageRateLimitError,
+        AlphaVantageUnavailableError,
+    ):
+        # Vendor unavailable (no API key, network/proxy failure, premium-only
+        # endpoint). Let it propagate so the router can try the next vendor.
         raise
     except Exception as e:
         print(f"Error getting Alpha Vantage indicator data for {indicator}: {e}")

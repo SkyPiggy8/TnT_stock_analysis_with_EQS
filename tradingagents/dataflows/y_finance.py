@@ -3,6 +3,7 @@ from datetime import datetime
 from dateutil.relativedelta import relativedelta
 import pandas as pd
 import yfinance as yf
+from yfinance.exceptions import YFRateLimitError
 import os
 from .stockstats_utils import StockstatsUtils, _clean_dataframe, yf_retry, load_ohlcv, filter_financials_by_date
 from .symbol_utils import normalize_symbol, NoMarketDataError
@@ -171,6 +172,8 @@ def get_stock_stats_indicators_window(
 
     except NoMarketDataError:
         raise  # Unknown/delisted symbol — let the router emit the sentinel
+    except YFRateLimitError:
+        raise
     except Exception as e:
         print(f"Error getting bulk stockstats data: {e}")
         # Fallback to original implementation if bulk method fails
@@ -246,6 +249,8 @@ def get_stockstats_indicator(
         )
     except NoMarketDataError:
         raise  # Unknown/delisted symbol — let the router emit the sentinel
+    except YFRateLimitError:
+        raise
     except Exception as e:
         print(
             f"Error getting stockstats indicator data for indicator {indicator} on {curr_date}: {e}"
