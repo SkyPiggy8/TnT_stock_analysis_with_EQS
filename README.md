@@ -228,13 +228,19 @@ export DASHSCOPE_API_KEY=...       # Qwen — International (dashscope-intl.aliy
 export DASHSCOPE_CN_API_KEY=...    # Qwen — China (dashscope.aliyuncs.com)
 export ZHIPU_API_KEY=...           # GLM via Z.AI (international)
 export ZHIPU_CN_API_KEY=...        # GLM via BigModel (China, open.bigmodel.cn)
-export MINIMAX_API_KEY=...         # MiniMax — Global (api.minimax.io, M2.x, 204K ctx)
-export MINIMAX_CN_API_KEY=...      # MiniMax — China (api.minimaxi.com, M2.x, 204K ctx)
+export MINIMAX_API_KEY=...         # MiniMax — Global (api.minimax.io, M3 1M ctx + M2.x)
+export MINIMAX_CN_API_KEY=...      # MiniMax — China (api.minimaxi.com, M3 1M ctx + M2.x)
 export OPENROUTER_API_KEY=...      # OpenRouter
 export ALPHA_VANTAGE_API_KEY=...   # Alpha Vantage
 ```
 
 For enterprise providers (e.g. Azure OpenAI, AWS Bedrock), copy `.env.enterprise.example` to `.env.enterprise` and fill in your credentials.
+
+For `MiniMax-M3`, choose the region that issued the key: `Global` uses
+`MINIMAX_API_KEY` with `api.minimax.io`, while `China` uses
+`MINIMAX_CN_API_KEY` with `api.minimaxi.com`. The two account systems and keys
+are not interchangeable. `MiniMax-M3` is available in both the quick- and
+deep-thinking model menus.
 
 For local models, configure Ollama with `llm_provider: "ollama"`. The default endpoint is `http://localhost:11434/v1`; set `OLLAMA_BASE_URL` to point at a remote `ollama-serve`. Pull models with `ollama pull <name>`, and pick "Custom model ID" in the CLI for any model not listed by default.
 
@@ -282,15 +288,81 @@ Install the local data packages in the active Python environment:
 pip install tushare akshare --upgrade
 ```
 
-### Local dashboard
+### 本地 Web 看板
 
-The local dashboard is split into a Python backend and a static frontend. It reads saved reports from `reports/`, shows the final report, analyst sections, fetch log, A-share financial trends and valuation metrics, and can generate the net-inflow quant strategy on demand.
+本地 Web 由一个 Python HTTP 后端和静态前端组成，不需要另外安装 Node.js。后端读取 `reports/` 中由 CLI 保存的分析结果，前端负责展示总报告、各分析师分项、资金流量化信号、财务趋势、估值指标和抓取日志。
+
+#### 启动前准备
+
+先在仓库根目录运行一次分析并保存报告：
+
+```bash
+python -m cli.main
+```
+
+保存后，`reports/股票代码_时间/` 中应至少包含 `complete_report.md`；如果本次分析成功生成了量化策略，还会包含 `quant_strategy_report.md`。然后保持虚拟环境已激活，在同一目录启动本地服务：
 
 ```bash
 python web/backend/server.py --host 127.0.0.1 --port 8765
 ```
 
-Open `http://127.0.0.1:8765` in your browser. Live quant generation requires `TUSHARE_TOKEN` plus the `tushare` package in the active Python environment.
+浏览器打开 `http://127.0.0.1:8765`。服务默认只监听本机回环地址，不会自动暴露到公网；结束服务时在终端按 `Ctrl+C`。
+
+#### Web 如何工作
+
+页面打开后会执行以下流程：
+
+1. 后端扫描 `reports/`，只列出包含 `complete_report.md` 的报告目录。
+2. 前端默认加载最近更新的报告，也可以从左侧“历史报告”切换其他结果。
+3. 后端解析 `quant_strategy_report.md`，提取量化信号、Day 0、参考买入价、止盈价、风险退出价和最近 15 个交易日的数据。
+4. 页面按股票代码和报告日期请求 Tushare 财务快照，展示营收、利润、现金流、ROE、负债率、PE/PB 等信息。
+5. 输入新的股票代码和分析日期并点击“生成实时量化策略”时，后端会重新调用 Tushare 日线与资金流接口计算结果；点击“刷新财务快照”会重新加载相应日期的基本面数据。
+
+主要本地接口如下：
+
+| 接口 | 作用 |
+|---|---|
+| `GET /api/reports` | 列出本地历史报告 |
+| `GET /api/reports/{报告目录}` | 读取报告正文、分项和已保存的量化摘要 |
+| `GET /api/quant/{股票代码}?date=YYYY-MM-DD` | 按股票和日期重新计算量化策略 |
+| `GET /api/fundamentals/{股票代码}?date=YYYY-MM-DD` | 加载财务和估值快照 |
+| `GET /api/health` | 检查本地后端是否正常运行 |
+
+“生成实时量化策略”中的“实时”表示按当前选择重新请求最新可用的数据并计算，不代表盘中逐笔行情。当前策略使用 Tushare 日线收盘价和日度资金流，因此交易日尚未收盘时，应以收盘后的完整数据再次确认。
+
+#### 如何观察参考买入价和卖出价
+
+在左侧输入 A 股代码，例如 `600519.SH`、`000001.SZ`，选择分析日期后点击“生成实时量化策略”。结果主要显示在页面顶部的“量化信号”“Day 0”“止盈 / 风险线”三张卡片中，完整计算过程可在下方“量化策略”标签查看。
+
+策略规则如下：
+
+1. 计算目标交易日前 10 个交易日的平均成交额。
+2. 如果某日资金净流入为正，且达到此前 10 日平均成交额的 5%，该日被记为 `Day 0`。
+3. `Day 0 close` 是策略的参考买入价，不是系统自动成交的真实价格。
+4. 参考止盈价 = `Day 0 close × 1.20`。
+5. 风控退出价 = `Day 0 close × 0.85`。
+6. 信号最多监控 30 个自然日，超过后需要重新评估。
+
+例如，页面显示 `Day 0 close = 100.00` 时：
+
+| 观察项 | 价格 | 含义 |
+|---|---:|---|
+| 参考买入价 | `100.00` | 触发资金流条件当日的收盘价 |
+| 参考止盈价 | `120.00` | 最新收盘价达到或超过该价格时触发止盈信号 |
+| 风控退出价 | `85.00` | 最新收盘价达到或跌破该价格时触发减仓或退出信号 |
+
+量化信号含义：
+
+| 信号 | 如何处理 |
+|---|---|
+| `DATA_UNAVAILABLE` | 无法取得有效数据；检查 `TUSHARE_TOKEN`、`tushare` 安装、接口权限和网络 |
+| `NO_BUY_SIGNAL` | 回看区间内没有达到 5% 资金净流入条件，继续观察 |
+| `ACTIVE_BUY_OR_HOLD` | 已出现 Day 0，仍在 30 日窗口内且未触发上下边界 |
+| `SELL_TAKE_PROFIT` | 最新收盘价已达到参考止盈价 |
+| `REDUCE_OR_EXIT` | 最新收盘价已跌到风控退出价 |
+| `EXPIRED` | Day 0 已超过 30 个自然日，旧信号不再直接使用 |
+
+页面中的“主报告建议”来自多智能体研究和风险管理结论，“量化信号”来自独立的资金流规则，两者可能不同。实际决策应同时查看“新闻政策”“基本面”“组合决策”和“抓取日志”，并核对最新公告和真实可成交价格。本项目不会连接券商或自动提交订单，所有价格均为研究与策略观察参考，不构成投资建议。
 
 <p align="center">
   <img src="assets/cli/cli_init.png" width="100%" style="display: inline-block; margin: 0 2%;">

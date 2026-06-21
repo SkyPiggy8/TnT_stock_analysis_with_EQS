@@ -98,7 +98,8 @@ _BY_ID: dict[str, ModelCapabilities] = {
     "deepseek-v4-flash": _DEEPSEEK_THINKING,
     "deepseek-v4-pro": _DEEPSEEK_THINKING,
     # MiniMax — full official model lineup per
-    # platform.minimax.io/docs/api-reference/text-openai-api
+    # platform.minimaxi.com/docs/api-reference/text-openai-api
+    "MiniMax-M3": _MINIMAX_THINKING,
     "MiniMax-M2.7": _MINIMAX_THINKING,
     "MiniMax-M2.7-highspeed": _MINIMAX_THINKING,
     "MiniMax-M2.5": _MINIMAX_THINKING,

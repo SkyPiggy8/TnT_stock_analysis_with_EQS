@@ -23,6 +23,13 @@ class DummyLLMClient(BaseLLMClient):
 
 @pytest.mark.unit
 class ModelValidationTests(unittest.TestCase):
+    def test_minimax_m3_is_available_in_both_regions(self):
+        known = get_known_models()
+        self.assertIn("MiniMax-M3", known["minimax"])
+        self.assertIn("MiniMax-M3", known["minimax-cn"])
+        self.assertTrue(validate_model("minimax", "MiniMax-M3"))
+        self.assertTrue(validate_model("minimax-cn", "MiniMax-M3"))
+
     def test_cli_catalog_models_are_all_validator_approved(self):
         for provider, models in get_known_models().items():
             if provider in ("ollama", "openrouter"):

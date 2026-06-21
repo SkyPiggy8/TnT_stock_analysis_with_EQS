@@ -42,6 +42,13 @@ class TestMinimaxReasoningSplit:
             assert "reasoning_split" not in payload
             assert "reasoning_split" not in payload.get("extra_body", {})
 
+    def test_m3_injects_reasoning_split_via_extra_body(self):
+        payload = _client("MiniMax-M3")._get_request_payload(
+            [HumanMessage(content="hi")]
+        )
+        assert payload.get("extra_body", {}).get("reasoning_split") is True
+        assert "reasoning_split" not in payload
+
 
 @pytest.mark.unit
 class TestMinimaxStructuredOutputDispatch:
