@@ -39,6 +39,8 @@ class MoneyflowSignalConfig:
     limit_up_threshold: float = 0.095
     valuation_lookback_days: int = 1095
     margin_of_safety_pct: float = 0.10
+    valuation_ratio_floor: float = 1 / 3
+    valuation_ratio_ceiling: float = 3.0
     example_capital: float = 100_000.0
     risk_budget_pct: float = 0.01
     max_position_pct: float = 0.20
@@ -216,13 +218,25 @@ def _load_relative_valuation(
         if len(history) < 60 or current is None or pd.isna(current) or float(current) <= 0:
             continue
         historical_median = float(history.median())
+        relative_multiple = float(current) / historical_median
+        if not cfg.valuation_ratio_floor <= relative_multiple <= cfg.valuation_ratio_ceiling:
+            details.append(
+                f"{label} {float(current):.2f} vs history median {historical_median:.2f} ignored: "
+                f"current/median {relative_multiple:.2f}x is outside the "
+                f"{cfg.valuation_ratio_floor:.2f}x-{cfg.valuation_ratio_ceiling:.2f}x reliability band"
+            )
+            continue
         fair_value = latest_close * historical_median / float(current)
         if fair_value > 0:
             candidates.append(fair_value)
             details.append(f"{label} {float(current):.2f} vs history median {historical_median:.2f}")
 
     if not candidates:
-        return {"available": False, "reason": "relative valuation unavailable: insufficient positive PE/PB history"}
+        return {
+            "available": False,
+            "reason": "relative valuation unavailable: no reliable PE/PB anchor",
+            "details": details,
+        }
 
     fair_value = float(median(candidates))
     entry_ceiling = fair_value * (1 - cfg.margin_of_safety_pct)
@@ -455,22 +469,90 @@ def _strategy_plans(data: pd.DataFrame, cfg: MoneyflowSignalConfig) -> list[Trad
     return plans
 
 
-def _backtest_summary(plans: list[TradePlan], cfg: MoneyflowSignalConfig) -> dict:
+def _backtest_summary(
+    plans: list[TradePlan],
+    cfg: MoneyflowSignalConfig,
+    data: pd.DataFrame,
+) -> dict:
     completed = [plan for plan in plans if plan.entry_price and plan.exit_price]
-    returns = [
-        plan.exit_price / plan.entry_price - 1 - cfg.round_trip_cost_bps / 10_000
-        for plan in completed
-    ]
+    trades = []
+    returns = []
+    for plan in completed:
+        net_return = plan.exit_price / plan.entry_price - 1 - cfg.round_trip_cost_bps / 10_000
+        returns.append(net_return)
+        trades.append(
+            {
+                "signalDate": plan.signal_date.strftime("%Y-%m-%d"),
+                "entryDate": plan.entry_date.strftime("%Y-%m-%d") if plan.entry_date is not None else "",
+                "exitDate": plan.exit_date.strftime("%Y-%m-%d") if plan.exit_date is not None else "",
+                "entryPrice": float(plan.entry_price),
+                "exitPrice": float(plan.exit_price),
+                "return": net_return,
+                "status": plan.status,
+                "holdingDays": int((plan.exit_date - plan.entry_date).days)
+                if plan.exit_date is not None and plan.entry_date is not None
+                else 0,
+            }
+        )
+
+    benchmark_return = None
+    benchmark_rows = data.dropna(subset=["Close"])
+    if len(benchmark_rows) >= 2:
+        benchmark_return = (
+            float(benchmark_rows.iloc[-1]["Close"]) / float(benchmark_rows.iloc[0]["Close"])
+            - 1
+            - cfg.round_trip_cost_bps / 10_000
+        )
+
     if not returns:
-        return {"trades": 0, "winRate": None, "averageReturn": None, "totalReturn": None}
+        return {
+            "trades": 0,
+            "winRate": None,
+            "averageReturn": None,
+            "totalReturn": None,
+            "benchmarkReturn": benchmark_return,
+            "excessReturn": None,
+            "maxDrawdown": None,
+            "profitFactor": None,
+            "averageHoldingDays": None,
+            "evidenceGrade": "INSUFFICIENT_SAMPLE",
+            "tradeDetails": [],
+        }
+
     total_return = 1.0
+    peak = 1.0
+    max_drawdown = 0.0
     for value in returns:
         total_return *= 1 + value
+        peak = max(peak, total_return)
+        max_drawdown = min(max_drawdown, total_return / peak - 1)
+    compounded_return = total_return - 1
+    gross_profit = sum(value for value in returns if value > 0)
+    gross_loss = abs(sum(value for value in returns if value < 0))
+    profit_factor = gross_profit / gross_loss if gross_loss > 0 else None
+    excess_return = compounded_return - benchmark_return if benchmark_return is not None else None
+
+    if len(returns) < 5:
+        evidence_grade = "INSUFFICIENT_SAMPLE"
+    elif compounded_return > 0 and (excess_return is None or excess_return > 0) and max_drawdown >= -0.20:
+        evidence_grade = "PROMISING_IN_SAMPLE"
+    elif compounded_return > 0:
+        evidence_grade = "POSITIVE_BUT_UNPROVEN"
+    else:
+        evidence_grade = "NOT_VALIDATED"
+
     return {
         "trades": len(returns),
         "winRate": sum(value > 0 for value in returns) / len(returns),
         "averageReturn": sum(returns) / len(returns),
-        "totalReturn": total_return - 1,
+        "totalReturn": compounded_return,
+        "benchmarkReturn": benchmark_return,
+        "excessReturn": excess_return,
+        "maxDrawdown": max_drawdown,
+        "profitFactor": profit_factor,
+        "averageHoldingDays": sum(trade["holdingDays"] for trade in trades) / len(trades),
+        "evidenceGrade": evidence_grade,
+        "tradeDetails": trades,
     }
 
 
@@ -549,7 +631,7 @@ def build_quant_strategy_report(
     if plan is not None:
         matching = data.index[data["Date"] == plan.signal_date].tolist()
         signal_row = data.iloc[matching[0]] if matching else None
-    backtest = _backtest_summary(plans, cfg)
+    backtest = _backtest_summary(plans, cfg, data)
     example_shares = _example_position_size(plan, cfg)
     valuation = _load_relative_valuation(symbol, analysis_date, float(latest["Close"]), cfg)
     entry_low, entry_high, entry_basis = _entry_zone(latest, signal_row, valuation, cfg)
@@ -587,6 +669,9 @@ def build_quant_strategy_report(
         f"- Suggested entry zone: {entry_low:.2f} - {entry_high:.2f}",
         f"- Entry pricing basis: {entry_basis}",
         f"- Latest close: {float(latest['Close']):.2f} ({latest['Date'].strftime('%Y-%m-%d')})",
+        f"- Latest 3-day net inflow: {float(latest['FlowSum']):.2f} 万元",
+        f"- Latest 3-day flow intensity: {float(latest['FlowIntensity']):.2%}",
+        f"- Latest flow date: {latest['Date'].strftime('%Y-%m-%d')}",
     ]
 
     if signal_row is not None:
@@ -594,9 +679,9 @@ def build_quant_strategy_report(
             [
                 f"- Day 0: {signal_row['Date'].strftime('%Y-%m-%d')}",
                 f"- Day 0 close: {float(signal_row['Close']):.2f}",
-                f"- 3-day net inflow: {float(signal_row['FlowSum']):.2f} 万元",
+                f"- Signal-window 3-day net inflow: {float(signal_row['FlowSum']):.2f} 万元",
                 f"- Positive flow days: {int(signal_row['PositiveFlowDays'])}/{cfg.flow_window}",
-                f"- Net inflow / matched turnover: {float(signal_row['FlowIntensity']):.2%}",
+                f"- Signal-window flow intensity: {float(signal_row['FlowIntensity']):.2%}",
                 f"- Turnover expansion: {float(signal_row['TurnoverExpansion']):.2f}x",
             ]
         )
@@ -662,11 +747,38 @@ def build_quant_strategy_report(
                 f"- Win rate: {backtest['winRate']:.2%}",
                 f"- Average return after modeled costs: {backtest['averageReturn']:.2%}",
                 f"- Compounded return after modeled costs: {backtest['totalReturn']:.2%}",
+                f"- Buy-and-hold benchmark return: {backtest['benchmarkReturn']:.2%}" if backtest["benchmarkReturn"] is not None else "- Buy-and-hold benchmark return: N/A",
+                f"- Excess return vs benchmark: {backtest['excessReturn']:.2%}" if backtest["excessReturn"] is not None else "- Excess return vs benchmark: N/A",
+                f"- Trade-sequence max drawdown: {backtest['maxDrawdown']:.2%}",
+                f"- Profit factor: {backtest['profitFactor']:.2f}" if backtest["profitFactor"] is not None else "- Profit factor: N/A (no losing trade)",
+                f"- Average holding days: {backtest['averageHoldingDays']:.1f}",
+                f"- Evidence grade: {backtest['evidenceGrade']}",
             ]
         )
     else:
-        lines.append("- No completed non-overlapping trade in the loaded lookback window.")
+        lines.extend(
+            [
+                "- No completed non-overlapping trade in the loaded lookback window.",
+                f"- Buy-and-hold benchmark return: {backtest['benchmarkReturn']:.2%}" if backtest["benchmarkReturn"] is not None else "- Buy-and-hold benchmark return: N/A",
+                f"- Evidence grade: {backtest['evidenceGrade']}",
+            ]
+        )
     lines.append("- This is an in-sample single-stock diagnostic, not portfolio-level or out-of-sample proof.")
+
+    if backtest["tradeDetails"]:
+        lines.extend(
+            [
+                "",
+                "| Signal date | Entry date | Exit date | Entry | Exit | Net return | Holding days | Exit type |",
+                "|---|---|---|---:|---:|---:|---:|---|",
+            ]
+        )
+        for trade in backtest["tradeDetails"]:
+            lines.append(
+                "| {signalDate} | {entryDate} | {exitDate} | {entryPrice:.2f} | {exitPrice:.2f} | {return:.2%} | {holdingDays} | {status} |".format(
+                    **trade
+                )
+            )
 
     lines.extend(
         [

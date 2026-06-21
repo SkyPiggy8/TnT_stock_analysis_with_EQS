@@ -10,7 +10,8 @@ const $ = (id) => document.getElementById(id);
 
 function setStatus(text, kind = "neutral") {
   const node = $("statusLine");
-  node.textContent = text;
+  const icon = kind === "error" ? "i-alert" : "i-activity";
+  node.innerHTML = `<svg><use href="#${icon}" /></svg><span>${escapeHtml(text)}</span>`;
   node.dataset.kind = kind;
 }
 
@@ -138,6 +139,12 @@ function parsePercent(value) {
   return n == null ? null : n;
 }
 
+function formatPercentText(value, signed = false) {
+  const number = parsePercent(value);
+  if (number == null) return "-";
+  return `${signed && number > 0 ? "+" : ""}${number.toFixed(2)}%`;
+}
+
 function formatMoney(value) {
   if (value == null || !Number.isFinite(Number(value))) return "-";
   const number = Number(value);
@@ -183,7 +190,7 @@ function drawChart(rows) {
   ctx.scale(dpr, dpr);
   const w = width / dpr;
   const h = height / dpr;
-  ctx.fillStyle = "#090d10";
+  ctx.fillStyle = "#101319";
   ctx.fillRect(0, 0, w, h);
 
   const left = 56;
@@ -193,7 +200,7 @@ function drawChart(rows) {
   const plotW = w - left - right;
   const plotH = h - top - bottom;
 
-  ctx.strokeStyle = "rgba(255,255,255,0.08)";
+  ctx.strokeStyle = "rgba(132,142,156,0.16)";
   ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i += 1) {
     const y = top + (plotH * i) / 4;
@@ -214,7 +221,7 @@ function drawChart(rows) {
     .filter((row) => row.close != null || row.net != null);
 
   if (!parsed.length) {
-    ctx.fillStyle = "#8c9aa7";
+    ctx.fillStyle = "#848e9c";
     ctx.font = "13px system-ui";
     ctx.fillText("暂无量化序列，生成实时策略后会显示资金异动图。", left, top + 48);
     $("chartBadge").className = "badge neutral";
@@ -232,7 +239,7 @@ function drawChart(rows) {
   const barW = Math.max(5, plotW / parsed.length - barGap);
   const zeroY = top + plotH * 0.62;
 
-  ctx.strokeStyle = "rgba(215,179,106,0.45)";
+  ctx.strokeStyle = "rgba(240,185,11,0.42)";
   ctx.setLineDash([5, 5]);
   const thresholdY = top + plotH * 0.22;
   ctx.beginPath();
@@ -240,25 +247,25 @@ function drawChart(rows) {
   ctx.lineTo(left + plotW, thresholdY);
   ctx.stroke();
   ctx.setLineDash([]);
-  ctx.fillStyle = "#d7b36a";
+  ctx.fillStyle = "#f0b90b";
   ctx.font = "11px system-ui";
-  ctx.fillText("5% threshold", left + 4, thresholdY - 7);
+  ctx.fillText("3% FLOW INTENSITY", left + 4, thresholdY - 7);
 
   parsed.forEach((row, index) => {
     const x = left + index * (plotW / parsed.length) + barGap / 2;
     const barH = Math.abs((row.net || 0) / maxAbsNet) * plotH * 0.46;
     const y = row.net >= 0 ? zeroY - barH : zeroY;
-    ctx.fillStyle = row.net >= 0 ? "rgba(103,211,145,0.78)" : "rgba(255,111,111,0.72)";
+    ctx.fillStyle = row.net >= 0 ? "rgba(246,70,93,0.78)" : "rgba(14,203,129,0.76)";
     ctx.fillRect(x, y, barW, Math.max(2, barH));
     if (index % Math.ceil(parsed.length / 5) === 0) {
-      ctx.fillStyle = "#5d6b77";
+      ctx.fillStyle = "#5e6673";
       ctx.font = "10px system-ui";
       ctx.fillText(row.date.slice(5), x, h - 16);
     }
   });
 
-  ctx.strokeStyle = "#5cc9d8";
-  ctx.lineWidth = 2;
+  ctx.strokeStyle = "#fcd535";
+  ctx.lineWidth = 2.2;
   ctx.beginPath();
   parsed.forEach((row, index) => {
     if (row.close == null) return;
@@ -276,9 +283,9 @@ function drawChart(rows) {
   ctx.lineTo(left + plotW, top + plotH);
   ctx.stroke();
 
-  const hasSignal = parsed.some((row) => String(row.signal || "").toUpperCase().includes("BUY"));
-  $("chartBadge").className = hasSignal ? "badge signal" : "badge watch";
-  $("chartBadge").textContent = hasSignal ? "INFLOW SIGNAL" : "WATCH";
+  const latestFlow = parsed.at(-1)?.net;
+  $("chartBadge").className = latestFlow == null ? "badge watch" : latestFlow >= 0 ? "badge buy" : "badge sell";
+  $("chartBadge").textContent = latestFlow == null ? "WATCH" : latestFlow >= 0 ? "LATEST INFLOW" : "LATEST OUTFLOW";
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
 
@@ -292,7 +299,7 @@ function drawFundamentalChart(trends) {
   ctx.scale(dpr, dpr);
   const w = width / dpr;
   const h = height / dpr;
-  ctx.fillStyle = "#090d10";
+  ctx.fillStyle = "#101319";
   ctx.fillRect(0, 0, w, h);
 
   const rows = (trends || []).filter((row) => row.revenue != null || row.netProfit != null || row.operatingCashFlow != null);
@@ -303,7 +310,7 @@ function drawFundamentalChart(trends) {
   const plotW = w - left - right;
   const plotH = h - top - bottom;
 
-  ctx.strokeStyle = "rgba(255,255,255,0.08)";
+  ctx.strokeStyle = "rgba(132,142,156,0.16)";
   ctx.lineWidth = 1;
   for (let i = 0; i <= 4; i += 1) {
     const y = top + (plotH * i) / 4;
@@ -314,7 +321,7 @@ function drawFundamentalChart(trends) {
   }
 
   if (!rows.length) {
-    ctx.fillStyle = "#8c9aa7";
+    ctx.fillStyle = "#848e9c";
     ctx.font = "13px system-ui";
     ctx.fillText("暂无可绘制的财务趋势数据。", left, top + 48);
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -330,16 +337,16 @@ function drawFundamentalChart(trends) {
   const slot = plotW / rows.length;
   const barW = Math.max(8, Math.min(34, slot * 0.42));
 
-  ctx.fillStyle = "rgba(92,201,216,0.62)";
+  ctx.fillStyle = "rgba(240,185,11,0.62)";
   rows.forEach((row, index) => {
     const revenue = Number(row.revenue) || 0;
     const x = left + slot * index + (slot - barW) / 2;
     const barH = (Math.abs(revenue) / revenueMax) * plotH * 0.88;
     ctx.fillRect(x, top + plotH - barH, barW, Math.max(2, barH));
-    ctx.fillStyle = "#5d6b77";
+    ctx.fillStyle = "#5e6673";
     ctx.font = "10px system-ui";
     ctx.fillText(periodLabel(row.period), x - 2, h - 16);
-    ctx.fillStyle = "rgba(92,201,216,0.62)";
+    ctx.fillStyle = "rgba(240,185,11,0.62)";
   });
 
   const drawLine = (field, color) => {
@@ -356,33 +363,213 @@ function drawFundamentalChart(trends) {
     });
     ctx.stroke();
   };
-  drawLine("netProfit", "#67d391");
-  drawLine("operatingCashFlow", "#d7b36a");
+  drawLine("netProfit", "#0ecb81");
+  drawLine("operatingCashFlow", "#4a8cff");
 
-  ctx.fillStyle = "#5cc9d8";
+  ctx.fillStyle = "#fcd535";
   ctx.fillRect(left, 13, 12, 7);
-  ctx.fillStyle = "#8c9aa7";
+  ctx.fillStyle = "#848e9c";
   ctx.font = "11px system-ui";
   ctx.fillText("累计营收", left + 18, 21);
-  ctx.strokeStyle = "#67d391";
+  ctx.strokeStyle = "#0ecb81";
   ctx.beginPath();
   ctx.moveTo(left + 92, 17);
   ctx.lineTo(left + 106, 17);
   ctx.stroke();
   ctx.fillText("归母净利润", left + 111, 21);
-  ctx.strokeStyle = "#d7b36a";
+  ctx.strokeStyle = "#4a8cff";
   ctx.beginPath();
   ctx.moveTo(left + 191, 17);
   ctx.lineTo(left + 205, 17);
   ctx.stroke();
   ctx.fillText("经营现金流", left + 210, 21);
 
-  ctx.fillStyle = "#5d6b77";
+  ctx.fillStyle = "#5e6673";
   ctx.font = "10px system-ui";
   ctx.fillText(`${(revenueMax / 100_000_000).toFixed(1)}亿`, 8, top + 5);
   ctx.fillText(`${(profitMax / 100_000_000).toFixed(1)}亿`, w - right + 8, top + 5);
   ctx.fillText(`${(profitMin / 100_000_000).toFixed(1)}亿`, w - right + 8, top + plotH);
   ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+function evidenceMeta(grade) {
+  const key = String(grade || "INSUFFICIENT_SAMPLE").toUpperCase();
+  const map = {
+    PROMISING_IN_SAMPLE: { label: "样本内积极", className: "positive" },
+    POSITIVE_BUT_UNPROVEN: { label: "正收益但未验证", className: "watch" },
+    NOT_VALIDATED: { label: "暂未验证", className: "negative" },
+    INSUFFICIENT_SAMPLE: { label: "样本不足", className: "neutral" },
+  };
+  return map[key] || { label: key.replaceAll("_", " "), className: "neutral" };
+}
+
+function calculateEvidenceScore(quant) {
+  const trades = parseNumber(quant.completedTrades) || 0;
+  const winRate = parsePercent(quant.winRate);
+  const totalReturn = parsePercent(quant.totalReturn);
+  const excess = parsePercent(quant.excessReturn);
+  const drawdown = parsePercent(quant.maxDrawdown);
+  const profitFactor = parseNumber(quant.profitFactor);
+  let score = Math.min(trades / 8, 1) * 32;
+  if (winRate != null) score += Math.max(0, Math.min(winRate / 65, 1)) * 18;
+  if (totalReturn != null) score += Math.max(0, Math.min((totalReturn + 5) / 30, 1)) * 18;
+  if (excess != null) score += Math.max(0, Math.min((excess + 5) / 20, 1)) * 14;
+  if (drawdown != null) score += Math.max(0, Math.min((20 + drawdown) / 20, 1)) * 10;
+  if (profitFactor != null) score += Math.max(0, Math.min(profitFactor / 2, 1)) * 8;
+  if (trades < 5) score = Math.min(score, 44);
+  return Math.max(0, Math.min(100, Math.round(score)));
+}
+
+function drawBacktestChart(trades) {
+  const canvas = $("backtestChart");
+  const dpr = resizeCanvas(canvas);
+  const ctx = canvas.getContext("2d");
+  const width = canvas.width;
+  const height = canvas.height;
+  ctx.clearRect(0, 0, width, height);
+  ctx.scale(dpr, dpr);
+  const w = width / dpr;
+  const h = height / dpr;
+  ctx.fillStyle = "#101319";
+  ctx.fillRect(0, 0, w, h);
+
+  const left = 54;
+  const right = 22;
+  const top = 24;
+  const bottom = 38;
+  const plotW = w - left - right;
+  const plotH = h - top - bottom;
+  ctx.strokeStyle = "rgba(132,142,156,0.16)";
+  ctx.lineWidth = 1;
+  for (let i = 0; i <= 4; i += 1) {
+    const y = top + plotH * i / 4;
+    ctx.beginPath();
+    ctx.moveTo(left, y);
+    ctx.lineTo(left + plotW, y);
+    ctx.stroke();
+  }
+
+  const points = [{ equity: 100, label: "START" }];
+  let equity = 100;
+  (trades || []).forEach((trade, index) => {
+    const value = parsePercent(trade.return);
+    if (value == null) return;
+    equity *= 1 + value / 100;
+    points.push({ equity, label: trade.exitDate || `T${index + 1}` });
+  });
+
+  if (points.length === 1) {
+    ctx.fillStyle = "#848e9c";
+    ctx.font = "12px Arial";
+    ctx.fillText("暂无已完成交易，权益曲线需要至少一笔退出记录。", left, top + 48);
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    return;
+  }
+
+  const values = points.map((point) => point.equity);
+  const minValue = Math.min(...values, 100) * 0.98;
+  const maxValue = Math.max(...values, 100) * 1.02;
+  const range = Math.max(maxValue - minValue, 1);
+  const coords = points.map((point, index) => ({
+    ...point,
+    x: left + plotW * index / Math.max(points.length - 1, 1),
+    y: top + plotH - (point.equity - minValue) / range * plotH,
+  }));
+
+  const gradient = ctx.createLinearGradient(0, top, 0, top + plotH);
+  gradient.addColorStop(0, "rgba(252,213,53,0.24)");
+  gradient.addColorStop(1, "rgba(252,213,53,0)");
+  ctx.beginPath();
+  ctx.moveTo(coords[0].x, top + plotH);
+  coords.forEach((point) => ctx.lineTo(point.x, point.y));
+  ctx.lineTo(coords[coords.length - 1].x, top + plotH);
+  ctx.closePath();
+  ctx.fillStyle = gradient;
+  ctx.fill();
+
+  ctx.beginPath();
+  coords.forEach((point, index) => index === 0 ? ctx.moveTo(point.x, point.y) : ctx.lineTo(point.x, point.y));
+  ctx.strokeStyle = "#fcd535";
+  ctx.lineWidth = 2.2;
+  ctx.stroke();
+  coords.forEach((point) => {
+    ctx.beginPath();
+    ctx.arc(point.x, point.y, 3.2, 0, Math.PI * 2);
+    ctx.fillStyle = point.equity >= 100 ? "#f6465d" : "#0ecb81";
+    ctx.fill();
+  });
+
+  ctx.fillStyle = "#848e9c";
+  ctx.font = "10px Arial";
+  ctx.fillText(maxValue.toFixed(1), 8, top + 4);
+  ctx.fillText(minValue.toFixed(1), 8, top + plotH);
+  coords.forEach((point, index) => {
+    if (index === 0 || index === coords.length - 1 || index % Math.ceil(coords.length / 5) === 0) {
+      ctx.fillText(point.label.slice(5) || point.label, Math.max(left, point.x - 15), h - 14);
+    }
+  });
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+function updateBacktest(quant) {
+  const trades = quant.backtestTrades || [];
+  const tradeCount = parseNumber(quant.completedTrades) || trades.length || 0;
+  const score = calculateEvidenceScore(quant);
+  const meta = evidenceMeta(quant.evidenceGrade);
+  const grade = $("backtestGrade");
+  grade.className = `evidence-grade ${meta.className}`;
+  grade.textContent = meta.label.toUpperCase();
+  $("evidenceScore").textContent = String(score);
+  $("evidenceLabel").textContent = meta.label;
+  $("evidenceGauge").style.setProperty("--score", `${score * 0.9}deg`);
+
+  $("btTrades").textContent = String(tradeCount);
+  $("btWinRate").textContent = formatPercentText(quant.winRate);
+  $("btDrawdown").textContent = formatPercentText(quant.maxDrawdown);
+  $("btProfitFactor").textContent = parseNumber(quant.profitFactor)?.toFixed(2) || "-";
+  $("btHolding").textContent = parseNumber(quant.averageHoldingDays) == null ? "-" : `${parseNumber(quant.averageHoldingDays).toFixed(1)} 天`;
+  $("backtestReturn").textContent = formatPercentText(quant.totalReturn, true);
+  $("benchmarkReturn").textContent = formatPercentText(quant.benchmarkReturn, true);
+  $("excessReturn").textContent = formatPercentText(quant.excessReturn, true);
+
+  const strategyReturn = parsePercent(quant.totalReturn);
+  const benchmark = parsePercent(quant.benchmarkReturn);
+  const scale = Math.max(Math.abs(strategyReturn || 0), Math.abs(benchmark || 0), 1);
+  const setBar = (id, value, positiveColor) => {
+    const node = $(id);
+    node.style.width = `${Math.min(Math.abs(value || 0) / scale * 100, 100)}%`;
+    node.style.background = value != null && value < 0 ? "#0ecb81" : positiveColor;
+  };
+  setBar("strategyReturnBar", strategyReturn, "#fcd535");
+  setBar("benchmarkReturnBar", benchmark, "#4a8cff");
+
+  $("backtestTradeBody").innerHTML = trades.length
+    ? trades.map((trade) => {
+      const value = parsePercent(trade.return);
+      const valueClass = value == null ? "" : value >= 0 ? "positive" : "negative";
+      return `<tr>
+        <td>${escapeHtml(trade.signalDate)}</td><td>${escapeHtml(trade.entryDate)}</td><td>${escapeHtml(trade.exitDate)}</td>
+        <td>${escapeHtml(trade.entryPrice)}</td><td>${escapeHtml(trade.exitPrice)}</td>
+        <td class="${valueClass}">${escapeHtml(trade.return)}</td><td>${escapeHtml(trade.holdingDays)} 天</td>
+        <td>${escapeHtml(displayQuantSignal(trade.status))}</td>
+      </tr>`;
+    }).join("")
+    : '<tr><td colspan="8" class="table-empty">暂无已完成交易；不能据此证明策略可行</td></tr>';
+  $("healthBacktest").textContent = tradeCount >= 5 ? meta.label : `样本不足（${tradeCount}/5）`;
+  drawBacktestChart(trades);
+}
+
+function updateHero(report, quant) {
+  const rows = quant.rows || [];
+  const closes = rows.map((row) => parseNumber(row.close)).filter((value) => value != null);
+  const latest = parseNumber(quant.latestClose) ?? closes.at(-1);
+  const previous = closes.length > 1 ? closes.at(-2) : null;
+  const change = latest != null && previous ? (latest / previous - 1) * 100 : null;
+  $("heroTicker").textContent = report?.ticker || "A-SHARE";
+  $("heroPrice").textContent = latest == null ? "--" : `¥${latest.toFixed(2)}`;
+  const changeNode = $("heroChange");
+  changeNode.className = `price-change ${change == null ? "neutral" : change >= 0 ? "positive" : "negative"}`;
+  changeNode.textContent = change == null ? "等待最新收盘" : `${change >= 0 ? "+" : ""}${change.toFixed(2)}% 最近交易日`;
 }
 
 function updateFundamentalView(snapshot, loading = false) {
@@ -406,6 +593,9 @@ function updateFundamentalView(snapshot, loading = false) {
   $("fundamentalSubtitle").textContent = snapshot
     ? `${company.name || snapshot.ticker} · ${company.industry || "行业未标注"} · 报告期 ${snapshot.latestPeriod || "-"}`
     : "Tushare 财务报表与每日估值";
+  $("healthFinancials").textContent = loading
+    ? "加载中"
+    : !snapshot ? "不可用" : snapshot.errors?.length ? "部分可用" : "完整";
 
   const badge = $("fundamentalBadge");
   if (loading) {
@@ -470,11 +660,14 @@ function updateDashboard(report) {
 
   $("metricQuantSignal").textContent = displayQuantSignal(quant.signal);
   $("metricReason").textContent = quant.reason || "暂无量化摘要";
-  $("metricDay0").textContent = quant.entryZone || quant.day0 || "-";
-  $("metricNetInflow").textContent = [
-    quant.entryPrice ? `T+1参考 ${quant.entryPrice}` : "",
-    quant.day0 ? `Day 0 ${quant.day0}` : "",
-  ].filter(Boolean).join(" / ") || "等待入场评估";
+  const exitSignal = ["REDUCE_OR_EXIT", "SELL_TAKE_PROFIT", "EXPIRED"].includes(String(quant.signal || "").toUpperCase());
+  $("metricDay0").textContent = exitSignal ? "暂停入场" : quant.entryZone || "-";
+  $("metricNetInflow").textContent = exitSignal
+    ? `当前为退场信号${quant.entryZone ? ` / 估值观察区 ${quant.entryZone}` : ""}`
+    : [
+      quant.entryPrice ? `T+1参考 ${quant.entryPrice}` : "",
+      quant.day0 ? `Day 0 ${quant.day0}` : "",
+    ].filter(Boolean).join(" / ") || "等待入场评估";
   $("metricLevels").textContent = quant.suggestedExit || quant.currentExit || quant.riskExit || "-";
   $("metricLatestClose").textContent = [
     quant.takeProfit ? `止盈 ${quant.takeProfit}` : "",
@@ -482,17 +675,32 @@ function updateDashboard(report) {
   ].filter(Boolean).join(" / ") || `最新收盘 ${quant.latestClose || "-"}`;
   $("metricDecision").textContent = decision;
   $("metricModified").textContent = report?.modified ? `更新 ${report.modified}` : "-";
+  const latestNetInflow = quant.latestNetInflow || quant.netInflow || "-";
+  const latestNetValue = parseNumber(latestNetInflow);
+  const latestFlowLabel = latestNetValue != null && latestNetValue < 0 ? "最近3日净流出" : "最近3日净流入";
+  $("metricFlowRatio").textContent = quant.latestInflowRatio || quant.inflowRatio || "-";
+  $("metricNetAmount").textContent = `${quant.latestFlowDate ? `截至 ${quant.latestFlowDate} ` : ""}${latestFlowLabel} ${latestNetInflow}`;
+
+  $("strategyAction").textContent = displayQuantSignal(quant.signal);
+  $("strategyActionReason").textContent = quant.reason || "暂无策略判断";
+  $("strategyEntry").textContent = exitSignal ? "暂停入场" : quant.entryPrice || quant.entryZone || "-";
+  $("strategyTarget").textContent = quant.takeProfit || "-";
+  $("strategyExit").textContent = quant.suggestedExit || quant.currentExit || quant.riskExit || "-";
 
   $("sourceReport").textContent = report ? "已加载" : "-";
   $("sourceQuant").textContent = state.liveQuant ? "实时生成" : report?.sections?.quant ? "报告内" : "未生成";
   $("sourceFundamentals").textContent = state.fundamentalSnapshot ? "Tushare" : "未加载";
   $("sourceLog").textContent = report?.sections?.fetchLog ? "已记录" : "无";
+  $("healthReport").textContent = report?.sections?.complete ? "完整" : "未加载";
+  $("healthQuant").textContent = state.liveQuant ? "实时计算" : report?.sections?.quant ? "报告快照" : "未生成";
 
   $("policyDigest").innerHTML = digestFromSections(report)
     .map((item) => `<div class="digest-item"><b>${escapeHtml(item.label)}</b><span>${escapeHtml(item.text)}</span></div>`)
     .join("");
 
   drawChart(quant.rows || []);
+  updateHero(report, quant);
+  updateBacktest(quant);
   updateFundamentalView(state.fundamentalSnapshot);
   updateTabs();
 }
@@ -571,7 +779,7 @@ async function runQuant() {
     const data = await requestJson(`/api/quant/${encodeURIComponent(ticker)}?date=${encodeURIComponent(date)}`);
     state.liveQuant = data;
     state.activeSection = "quant";
-    if (!state.activeReport) {
+    if (!state.activeReport || state.activeReport.ticker !== ticker) {
       state.activeReport = {
         ticker,
         analysisDate: date,
@@ -580,6 +788,10 @@ async function runQuant() {
         sections: {},
         quantSummary: data.summary,
       };
+    } else {
+      state.activeReport.analysisDate = date;
+      state.activeReport.modified = data.generatedAt;
+      state.activeReport.quantSummary = data.summary;
     }
     updateDashboard(state.activeReport);
     setStatus(`实时策略已生成 ${data.generatedAt}`);
@@ -605,7 +817,9 @@ function bindEvents() {
     updateTabs();
   });
   window.addEventListener("resize", () => {
-    drawChart((state.liveQuant?.summary || state.activeReport?.quantSummary || {}).rows || []);
+    const quant = state.liveQuant?.summary || state.activeReport?.quantSummary || {};
+    drawChart(quant.rows || []);
+    drawBacktestChart(quant.backtestTrades || []);
     drawFundamentalChart(state.fundamentalSnapshot?.trends || []);
   });
 }

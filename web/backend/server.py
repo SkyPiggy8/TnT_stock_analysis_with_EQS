@@ -111,16 +111,23 @@ def _extract_quant_summary(markdown: str) -> dict:
         return match.group(1).strip() if match else default
 
     rows = []
-    table_started = False
+    backtest_trades = []
+    table_kind = None
     for line in markdown.splitlines():
         if line.startswith("| Date | Close | Net inflow"):
-            table_started = True
+            table_kind = "market"
             continue
-        if table_started:
-            if not line.startswith("|") or line.startswith("|---"):
+        if line.startswith("| Signal date | Entry date | Exit date"):
+            table_kind = "backtest"
+            continue
+        if table_kind:
+            if not line.startswith("|"):
+                table_kind = None
+                continue
+            if line.startswith("|---"):
                 continue
             cells = [cell.strip() for cell in line.strip("|").split("|")]
-            if len(cells) >= 7:
+            if table_kind == "market" and len(cells) >= 7:
                 rows.append(
                     {
                         "date": cells[0],
@@ -132,14 +139,60 @@ def _extract_quant_summary(markdown: str) -> dict:
                         "signal": cells[6],
                     }
                 )
+            elif table_kind == "backtest" and len(cells) >= 8:
+                backtest_trades.append(
+                    {
+                        "signalDate": cells[0],
+                        "entryDate": cells[1],
+                        "exitDate": cells[2],
+                        "entryPrice": cells[3],
+                        "exitPrice": cells[4],
+                        "return": cells[5],
+                        "holdingDays": cells[6],
+                        "status": cells[7],
+                    }
+                )
+
+    signal_net_inflow = first(r"^- Signal-window 3-day net inflow:\s*(.+)$") or first(
+        r"^- (?:3-day net inflow|Net inflow):\s*(.+)$"
+    )
+    signal_inflow_ratio = first(r"^- Signal-window flow intensity:\s*(.+)$") or first(
+        r"^- (?:Net inflow / matched turnover|Net inflow / previous 10-day average turnover):\s*(.+)$"
+    )
+    latest_net_inflow = first(r"^- Latest 3-day net inflow:\s*(.+)$")
+    latest_inflow_ratio = first(r"^- Latest 3-day flow intensity:\s*(.+)$")
+    latest_flow_date = first(r"^- Latest flow date:\s*(.+)$")
+    if rows:
+        latest_total = None
+        if not latest_net_inflow:
+            try:
+                latest_total = sum(float(row["netInflow"].replace(",", "")) for row in rows[-3:])
+                latest_net_inflow = f"{latest_total:.2f} 万元"
+            except (TypeError, ValueError):
+                pass
+        if not latest_inflow_ratio:
+            try:
+                if latest_total is None:
+                    latest_total = sum(float(row["netInflow"].replace(",", "")) for row in rows[-3:])
+                matched_days = min(3, len(rows))
+                matched_turnover = float(rows[-1]["avgTurnover"].replace(",", "")) * matched_days
+                latest_inflow_ratio = f"{latest_total / matched_turnover:.2%}"
+            except (TypeError, ValueError, ZeroDivisionError):
+                latest_inflow_ratio = rows[-1]["inflowRatio"]
+        latest_flow_date = latest_flow_date or rows[-1]["date"]
 
     return {
         "signal": first(r"^Signal:\s*(.+)$", "UNKNOWN"),
         "reason": first(r"^Reason:\s*(.+)$"),
         "day0": first(r"^- Day 0:\s*(.+)$"),
         "day0Close": first(r"^- Day 0 close:\s*(.+)$"),
-        "netInflow": first(r"^- (?:3-day net inflow|Net inflow):\s*(.+)$"),
-        "inflowRatio": first(r"^- (?:Net inflow / matched turnover|Net inflow / previous 10-day average turnover):\s*(.+)$"),
+        "netInflow": signal_net_inflow,
+        "inflowRatio": signal_inflow_ratio,
+        "signalNetInflow": signal_net_inflow,
+        "signalInflowRatio": signal_inflow_ratio,
+        "latestNetInflow": latest_net_inflow,
+        "latestInflowRatio": latest_inflow_ratio,
+        "latestFlowDate": latest_flow_date,
         "entryZone": first(r"^- Suggested entry zone:\s*(.+)$"),
         "entryBasis": first(r"^- Entry pricing basis:\s*(.+)$"),
         "entryDate": first(r"^- Reference entry date:\s*(.+)$"),
@@ -149,6 +202,17 @@ def _extract_quant_summary(markdown: str) -> dict:
         "currentExit": first(r"^- Current exit trigger:\s*(.+)$"),
         "suggestedExit": first(r"^- Suggested exit price now:\s*(.+)$"),
         "latestClose": first(r"^- Latest close:\s*(.+)$"),
+        "completedTrades": first(r"^- Completed non-overlapping trades:\s*(.+)$", "0"),
+        "winRate": first(r"^- Win rate:\s*(.+)$"),
+        "averageReturn": first(r"^- Average return after modeled costs:\s*(.+)$"),
+        "totalReturn": first(r"^- Compounded return after modeled costs:\s*(.+)$"),
+        "benchmarkReturn": first(r"^- Buy-and-hold benchmark return:\s*(.+)$"),
+        "excessReturn": first(r"^- Excess return vs benchmark:\s*(.+)$"),
+        "maxDrawdown": first(r"^- Trade-sequence max drawdown:\s*(.+)$"),
+        "profitFactor": first(r"^- Profit factor:\s*(.+)$"),
+        "averageHoldingDays": first(r"^- Average holding days:\s*(.+)$"),
+        "evidenceGrade": first(r"^- Evidence grade:\s*(.+)$", "INSUFFICIENT_SAMPLE"),
+        "backtestTrades": backtest_trades,
         "rows": rows,
     }
 

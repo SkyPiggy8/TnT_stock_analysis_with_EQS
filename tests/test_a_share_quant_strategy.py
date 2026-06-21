@@ -97,7 +97,9 @@ class TestAShareQuantStrategy(unittest.TestCase):
         self.assertIn("Signal: ACTIVE_HOLD_MONITOR", report)
         self.assertIn(f"- Day 0: {dates[32].strftime('%Y-%m-%d')}", report)
         self.assertIn(f"- Reference entry date: {dates[33].strftime('%Y-%m-%d')}", report)
-        self.assertIn("- Net inflow / matched turnover: 3.50%", report)
+        self.assertIn("- Signal-window flow intensity: 3.50%", report)
+        self.assertIn("- Latest 3-day net inflow:", report)
+        self.assertIn("- Latest 3-day flow intensity:", report)
         self.assertNotIn("Reference entry price: 11.60\n", report)
         self.assertIn("Day 0 close is never treated as an executable fill", report)
         self.assertIn("- Example position limit:", report)
@@ -114,6 +116,10 @@ class TestAShareQuantStrategy(unittest.TestCase):
         self.assertIn("Signal: REDUCE_OR_EXIT", report)
         self.assertIn(f"- Exit event date: {dates[35].strftime('%Y-%m-%d')}", report)
         self.assertIn("- Suggested exit price now:", report)
+        self.assertIn("- Completed non-overlapping trades: 1", report)
+        self.assertIn("- Buy-and-hold benchmark return:", report)
+        self.assertIn("- Evidence grade: INSUFFICIENT_SAMPLE", report)
+        self.assertIn("| Signal date | Entry date | Exit date |", report)
 
     def test_latest_day_signal_waits_for_t_plus_one_execution(self):
         dates, daily, moneyflow = _market_frames()
@@ -144,6 +150,27 @@ class TestAShareQuantStrategy(unittest.TestCase):
         self.assertIn("Fundamental entry ceiling after 10% safety margin", report)
         self.assertIn("PE(TTM) 20.00 vs history median 10.00", report)
         self.assertIn("- Suggested entry zone:", report)
+
+    def test_extreme_pe_does_not_drag_entry_zone_far_below_stable_pb_anchor(self):
+        dates, daily, moneyflow = _market_frames()
+        _trigger(moneyflow, 32)
+        valuation_dates = pd.bdate_range("2025-07-01", periods=120)
+        valuation = pd.DataFrame(
+            {
+                "ts_code": ["000001.SZ"] * 120,
+                "trade_date": [date.strftime("%Y%m%d") for date in valuation_dates],
+                "close": [12.0] * 120,
+                "pe_ttm": [30.0] * 119 + [140.0],
+                "pb": [1.2] * 119 + [1.16],
+            }
+        )
+
+        report = self._report(daily, moneyflow, dates[-1], valuation=valuation)
+
+        self.assertIn("PE(TTM) 140.00 vs history median 30.00 ignored", report)
+        self.assertIn("PB 1.16 vs history median 1.20", report)
+        self.assertIn("- Relative fair value: 12.88", report)
+        self.assertIn("- Fundamental entry ceiling after 10% safety margin: 11.59", report)
 
     def test_material_change_pauses_new_entry(self):
         dates, daily, moneyflow = _market_frames()
