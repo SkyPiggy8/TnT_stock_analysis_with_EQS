@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
+from statistics import median
 
 import pandas as pd
 from dateutil.relativedelta import relativedelta
@@ -18,12 +19,44 @@ from .tushare_data import (
 
 @dataclass(frozen=True)
 class MoneyflowSignalConfig:
-    lookback_calendar_days: int = 180
-    prev_amount_window: int = 10
-    signal_threshold: float = 0.05
-    take_profit_pct: float = 0.20
-    stop_loss_pct: float = 0.15
+    lookback_calendar_days: int = 540
+    prev_amount_window: int = 20
+    flow_window: int = 3
+    signal_threshold: float = 0.03
+    min_positive_flow_days: int = 2
+    min_turnover_expansion: float = 1.0
+    trend_ma_window: int = 20
+    max_chase_pct: float = 0.08
+    atr_window: int = 14
+    atr_stop_multiple: float = 2.0
+    trailing_atr_multiple: float = 2.5
+    minimum_stop_pct: float = 0.03
+    maximum_stop_pct: float = 0.15
+    reward_risk_ratio: float = 2.0
     monitor_days: int = 30
+    slippage_bps: float = 10.0
+    round_trip_cost_bps: float = 30.0
+    limit_up_threshold: float = 0.095
+    valuation_lookback_days: int = 1095
+    margin_of_safety_pct: float = 0.10
+    example_capital: float = 100_000.0
+    risk_budget_pct: float = 0.01
+    max_position_pct: float = 0.20
+
+
+@dataclass(frozen=True)
+class TradePlan:
+    status: str
+    reason: str
+    signal_date: pd.Timestamp
+    signal_close: float
+    entry_date: pd.Timestamp | None
+    entry_price: float | None
+    take_profit: float | None
+    initial_stop: float | None
+    current_exit: float | None
+    exit_date: pd.Timestamp | None = None
+    exit_price: float | None = None
 
 
 MATERIAL_CHANGE_KEYWORDS = (
@@ -101,9 +134,110 @@ def _load_tushare_moneyflow(symbol: str, start_date: str, end_date: str) -> pd.D
     return data
 
 
+def _apply_forward_adjustment(
+    symbol: str,
+    prices: pd.DataFrame,
+    start_date: str,
+    end_date: str,
+) -> tuple[pd.DataFrame, bool]:
+    """Put historical OHLC on the latest-price basis using Tushare adj_factor.
+
+    Adjustment is best-effort. Missing permissions or data must not make the
+    whole signal unavailable; the report explicitly states when raw prices are
+    used instead.
+    """
+
+    adjusted = prices.copy()
+    try:
+        pro = _ensure_tushare_client()
+        factors = pro.adj_factor(
+            ts_code=_tushare_symbol(symbol),
+            start_date=_tushare_date(start_date),
+            end_date=_tushare_date(end_date),
+            fields="ts_code,trade_date,adj_factor",
+        )
+        if factors is None or factors.empty:
+            return adjusted, False
+        factors = factors.rename(columns={"trade_date": "Date", "adj_factor": "AdjFactor"})
+        factors["Date"] = pd.to_datetime(factors["Date"], format="%Y%m%d", errors="coerce")
+        factors["AdjFactor"] = pd.to_numeric(factors["AdjFactor"], errors="coerce")
+        adjusted = pd.merge(adjusted, factors[["Date", "AdjFactor"]], on="Date", how="left")
+        adjusted["AdjFactor"] = adjusted["AdjFactor"].ffill().bfill()
+        latest_factor = adjusted["AdjFactor"].dropna().iloc[-1]
+        if not latest_factor or pd.isna(latest_factor):
+            return prices.copy(), False
+        scale = adjusted["AdjFactor"] / float(latest_factor)
+        for column in ("Open", "High", "Low", "Close"):
+            adjusted[column] = adjusted[column] * scale
+        return adjusted.drop(columns=["AdjFactor"]), True
+    except Exception:
+        return prices.copy(), False
+
+
+def _load_relative_valuation(
+    symbol: str,
+    analysis_date: str,
+    latest_close: float,
+    cfg: MoneyflowSignalConfig,
+) -> dict:
+    """Estimate a relative fair value from the stock's own PE/PB history."""
+
+    end_dt = datetime.strptime(analysis_date, "%Y-%m-%d")
+    start_dt = end_dt - relativedelta(days=cfg.valuation_lookback_days)
+    try:
+        pro = _ensure_tushare_client()
+        data = pro.daily_basic(
+            ts_code=_tushare_symbol(symbol),
+            start_date=start_dt.strftime("%Y%m%d"),
+            end_date=end_dt.strftime("%Y%m%d"),
+            fields="ts_code,trade_date,close,pe_ttm,pb",
+        )
+    except Exception as exc:
+        return {"available": False, "reason": f"relative valuation unavailable: {type(exc).__name__}"}
+
+    if data is None or data.empty:
+        return {"available": False, "reason": "relative valuation unavailable: no daily_basic rows"}
+
+    for column in ("close", "pe_ttm", "pb"):
+        if column in data.columns:
+            data[column] = pd.to_numeric(data[column], errors="coerce")
+    if "trade_date" in data.columns:
+        data["trade_date"] = pd.to_datetime(data["trade_date"], format="%Y%m%d", errors="coerce")
+        data = data.sort_values("trade_date")
+
+    latest = data.iloc[-1]
+    candidates: list[float] = []
+    details: list[str] = []
+    for field, label in (("pe_ttm", "PE(TTM)"), ("pb", "PB")):
+        if field not in data.columns:
+            continue
+        history = data.loc[data[field] > 0, field].dropna()
+        current = latest.get(field)
+        if len(history) < 60 or current is None or pd.isna(current) or float(current) <= 0:
+            continue
+        historical_median = float(history.median())
+        fair_value = latest_close * historical_median / float(current)
+        if fair_value > 0:
+            candidates.append(fair_value)
+            details.append(f"{label} {float(current):.2f} vs history median {historical_median:.2f}")
+
+    if not candidates:
+        return {"available": False, "reason": "relative valuation unavailable: insufficient positive PE/PB history"}
+
+    fair_value = float(median(candidates))
+    entry_ceiling = fair_value * (1 - cfg.margin_of_safety_pct)
+    return {
+        "available": True,
+        "fairValue": fair_value,
+        "entryCeiling": entry_ceiling,
+        "details": details,
+        "method": "own historical PE/PB median with margin of safety",
+    }
+
+
 def _material_change_gate(final_state: dict | None) -> tuple[str, list[str]]:
     if not final_state:
-        return "未接入政策面/基本面文本，仅按资金流和价格触发；下单前需要人工确认基本面没有重大变化。", []
+        return "未接入政策面/基本面文本，价格区间只使用结构化估值和行情数据。", []
 
     text = "\n".join(
         str(final_state.get(key, ""))
@@ -111,29 +245,270 @@ def _material_change_gate(final_state: dict | None) -> tuple[str, list[str]]:
     )
     hits = [kw for kw in MATERIAL_CHANGE_KEYWORDS if kw in text]
     if hits:
-        return (
-            "报告文本中出现可能代表政策面/基本面变化的关键词，资金流买入信号需要降级并人工复核。",
-            hits,
+        return "发现重大变化关键词；暂停新增入场，并按最新可成交价格人工复核退场。", hits
+    return "未在新闻、基本面和情绪报告中发现明显重大变化关键词。", []
+
+
+def _prepare_indicators(merged: pd.DataFrame, cfg: MoneyflowSignalConfig) -> pd.DataFrame:
+    data = merged.copy().sort_values("Date").reset_index(drop=True)
+    data["TurnoverAmount10k"] = pd.to_numeric(data["Amount"], errors="coerce") / 10.0
+    data["PrevAvgTurnover10k"] = (
+        data["TurnoverAmount10k"].rolling(cfg.prev_amount_window).mean().shift(1)
+    )
+    data["FlowSum"] = data["NetInflowAmount10k"].rolling(cfg.flow_window).sum()
+    data["PositiveFlowDays"] = (
+        (data["NetInflowAmount10k"] > 0).astype(int).rolling(cfg.flow_window).sum()
+    )
+    data["FlowIntensity"] = data["FlowSum"] / (
+        data["PrevAvgTurnover10k"] * cfg.flow_window
+    )
+    data["TurnoverExpansion"] = (
+        data["TurnoverAmount10k"].rolling(cfg.flow_window).mean()
+        / data["PrevAvgTurnover10k"]
+    )
+    data["MA20"] = data["Close"].rolling(cfg.trend_ma_window).mean()
+    data["ClosePctChange"] = data["Close"].pct_change()
+
+    previous_close = data["Close"].shift(1)
+    true_range = pd.concat(
+        [
+            data["High"] - data["Low"],
+            (data["High"] - previous_close).abs(),
+            (data["Low"] - previous_close).abs(),
+        ],
+        axis=1,
+    ).max(axis=1)
+    data["ATR"] = true_range.rolling(cfg.atr_window).mean()
+    data["BuyCondition"] = (
+        (data["FlowIntensity"] >= cfg.signal_threshold)
+        & (data["PositiveFlowDays"] >= cfg.min_positive_flow_days)
+        & (data["TurnoverExpansion"] >= cfg.min_turnover_expansion)
+        & (data["Close"] >= data["MA20"])
+        & (data["ClosePctChange"].abs() < cfg.max_chase_pct)
+    )
+    data["BuyTrigger"] = data["BuyCondition"] & ~data["BuyCondition"].shift(1, fill_value=False)
+    return data
+
+
+def _trade_plan(data: pd.DataFrame, signal_index: int, cfg: MoneyflowSignalConfig) -> TradePlan:
+    signal = data.iloc[signal_index]
+    signal_date = signal["Date"]
+    signal_close = float(signal["Close"])
+    if signal_index + 1 >= len(data):
+        return TradePlan(
+            "PENDING_ENTRY",
+            "资金流信号已确认，等待下一交易日可成交价格；不会按 Day 0 收盘价假设成交。",
+            signal_date,
+            signal_close,
+            None,
+            None,
+            None,
+            None,
+            None,
         )
-    return "未在新闻/基本面/情绪报告文本中发现明显重大变化关键词，资金流信号可以按正常权重评估。", []
+
+    entry_row = data.iloc[signal_index + 1]
+    entry_open = float(entry_row["Open"])
+    if entry_open >= signal_close * (1 + cfg.limit_up_threshold):
+        return TradePlan(
+            "ENTRY_BLOCKED_LIMIT_UP",
+            "下一交易日开盘接近涨停，按不可成交处理，等待重新出现信号。",
+            signal_date,
+            signal_close,
+            entry_row["Date"],
+            None,
+            None,
+            None,
+            None,
+        )
+
+    entry_price = entry_open * (1 + cfg.slippage_bps / 10_000)
+    atr = float(signal["ATR"]) if pd.notna(signal["ATR"]) else entry_price * 0.05
+    stop_distance = max(entry_price * cfg.minimum_stop_pct, atr * cfg.atr_stop_multiple)
+    stop_distance = min(stop_distance, entry_price * cfg.maximum_stop_pct)
+    initial_stop = entry_price - stop_distance
+    take_profit = entry_price + stop_distance * cfg.reward_risk_ratio
+    current_stop = initial_stop
+    peak_close = entry_price
+    latest = data.iloc[-1]
+
+    for row_index in range(signal_index + 1, len(data)):
+        row = data.iloc[row_index]
+        row_open = float(row["Open"])
+        row_low = float(row["Low"])
+        row_high = float(row["High"])
+        exit_slippage = 1 - cfg.slippage_bps / 10_000
+
+        if int((row["Date"] - signal_date).days) > cfg.monitor_days:
+            exit_price = row_open * (1 - cfg.slippage_bps / 10_000)
+            return TradePlan(
+                "EXPIRED",
+                f"信号已超过 {cfg.monitor_days} 个自然日，在首个可交易日按开盘参考价提示退出。",
+                signal_date,
+                signal_close,
+                entry_row["Date"],
+                entry_price,
+                take_profit,
+                initial_stop,
+                current_stop,
+                row["Date"],
+                exit_price,
+            )
+
+        # Conservative same-bar rule: if both boundaries are touched, assume
+        # the protective stop happened first because intraday ordering is unknown.
+        if row_open <= current_stop:
+            exit_price = row_open * exit_slippage
+            return TradePlan(
+                "REDUCE_OR_EXIT",
+                "价格跳空跌破动态风控线。",
+                signal_date,
+                signal_close,
+                entry_row["Date"],
+                entry_price,
+                take_profit,
+                initial_stop,
+                current_stop,
+                row["Date"],
+                exit_price,
+            )
+        if row_low <= current_stop:
+            exit_price = current_stop * exit_slippage
+            return TradePlan(
+                "REDUCE_OR_EXIT",
+                "盘中价格触及动态风控线。",
+                signal_date,
+                signal_close,
+                entry_row["Date"],
+                entry_price,
+                take_profit,
+                initial_stop,
+                current_stop,
+                row["Date"],
+                exit_price,
+            )
+        if row_open >= take_profit:
+            exit_price = row_open * exit_slippage
+            return TradePlan(
+                "SELL_TAKE_PROFIT",
+                "价格跳空达到收益风险比止盈线。",
+                signal_date,
+                signal_close,
+                entry_row["Date"],
+                entry_price,
+                take_profit,
+                initial_stop,
+                current_stop,
+                row["Date"],
+                exit_price,
+            )
+        if row_high >= take_profit:
+            exit_price = take_profit * exit_slippage
+            return TradePlan(
+                "SELL_TAKE_PROFIT",
+                "盘中价格触及收益风险比止盈线。",
+                signal_date,
+                signal_close,
+                entry_row["Date"],
+                entry_price,
+                take_profit,
+                initial_stop,
+                current_stop,
+                row["Date"],
+                exit_price,
+            )
+
+        peak_close = max(peak_close, float(row["Close"]))
+        row_atr = float(row["ATR"]) if pd.notna(row["ATR"]) else atr
+        current_stop = max(current_stop, peak_close - cfg.trailing_atr_multiple * row_atr)
+
+    return TradePlan(
+        "ACTIVE_HOLD_MONITOR",
+        "已按下一交易日价格建立观察仓位，尚未触发止盈、动态风控或时间退出。",
+        signal_date,
+        signal_close,
+        entry_row["Date"],
+        entry_price,
+        take_profit,
+        initial_stop,
+        current_stop,
+    )
 
 
-def _signal_status(latest_signal: pd.Series, latest_row: pd.Series, cfg: MoneyflowSignalConfig) -> tuple[str, str]:
-    entry = float(latest_signal["Close"])
-    latest_close = float(latest_row["Close"])
-    take_profit = entry * (1 + cfg.take_profit_pct)
-    stop_loss = entry * (1 - cfg.stop_loss_pct)
-    signal_date = latest_signal["Date"]
-    latest_date = latest_row["Date"]
-    days_elapsed = int((latest_date - signal_date).days)
+def _strategy_plans(data: pd.DataFrame, cfg: MoneyflowSignalConfig) -> list[TradePlan]:
+    """Evaluate non-overlapping signals as a single-position state machine."""
 
-    if latest_close >= take_profit:
-        return "SELL_TAKE_PROFIT", f"最新收盘价已达到或超过止盈线 {take_profit:.2f}。"
-    if latest_close <= stop_loss:
-        return "REDUCE_OR_EXIT", f"最新收盘价已跌破风控线 {stop_loss:.2f}。"
-    if days_elapsed > cfg.monitor_days:
-        return "EXPIRED", f"距离信号日已超过 {cfg.monitor_days} 个自然日，信号过期。"
-    return "ACTIVE_BUY_OR_HOLD", f"信号仍在 {cfg.monitor_days} 日监控窗口内，未触发止盈或止损。"
+    plans: list[TradePlan] = []
+    next_allowed_index = 0
+    date_to_index = {row["Date"]: index for index, row in data.iterrows()}
+    for signal_index in data.index[data["BuyTrigger"]].tolist():
+        if signal_index < next_allowed_index:
+            continue
+        plan = _trade_plan(data, signal_index, cfg)
+        plans.append(plan)
+        if plan.status == "ENTRY_BLOCKED_LIMIT_UP":
+            next_allowed_index = signal_index + 1
+            continue
+        if plan.exit_date is None:
+            break
+        next_allowed_index = date_to_index.get(plan.exit_date, signal_index) + 1
+    return plans
+
+
+def _backtest_summary(plans: list[TradePlan], cfg: MoneyflowSignalConfig) -> dict:
+    completed = [plan for plan in plans if plan.entry_price and plan.exit_price]
+    returns = [
+        plan.exit_price / plan.entry_price - 1 - cfg.round_trip_cost_bps / 10_000
+        for plan in completed
+    ]
+    if not returns:
+        return {"trades": 0, "winRate": None, "averageReturn": None, "totalReturn": None}
+    total_return = 1.0
+    for value in returns:
+        total_return *= 1 + value
+    return {
+        "trades": len(returns),
+        "winRate": sum(value > 0 for value in returns) / len(returns),
+        "averageReturn": sum(returns) / len(returns),
+        "totalReturn": total_return - 1,
+    }
+
+
+def _example_position_size(plan: TradePlan | None, cfg: MoneyflowSignalConfig) -> int | None:
+    if not plan or not plan.entry_price or not plan.initial_stop:
+        return None
+    risk_per_share = plan.entry_price - plan.initial_stop
+    if risk_per_share <= 0:
+        return None
+    risk_limited = cfg.example_capital * cfg.risk_budget_pct / risk_per_share
+    capital_limited = cfg.example_capital * cfg.max_position_pct / plan.entry_price
+    shares = int(min(risk_limited, capital_limited) // 100 * 100)
+    return max(shares, 0)
+
+
+def _entry_zone(
+    latest: pd.Series,
+    signal: pd.Series | None,
+    valuation: dict,
+    cfg: MoneyflowSignalConfig,
+) -> tuple[float, float, str]:
+    latest_close = float(latest["Close"])
+    atr = float(latest["ATR"]) if pd.notna(latest.get("ATR")) else latest_close * 0.04
+    technical_ceiling = latest_close
+    if signal is not None:
+        signal_atr = float(signal["ATR"]) if pd.notna(signal.get("ATR")) else atr
+        technical_ceiling = float(signal["Close"]) + 0.5 * signal_atr
+
+    if valuation.get("available"):
+        upper = min(technical_ceiling, float(valuation["entryCeiling"]))
+        basis = "历史 PE/PB 中位数、安全边际与 ATR/信号价格共同约束"
+    else:
+        upper = technical_ceiling
+        basis = "估值数据不足，仅使用 ATR 与信号价格；需人工核对基本面"
+
+    upper = max(upper, 0.01)
+    lower = max(0.01, upper - max(0.5 * atr, upper * 0.02))
+    return lower, upper, basis
 
 
 def build_quant_strategy_report(
@@ -142,7 +517,8 @@ def build_quant_strategy_report(
     final_state: dict | None = None,
     cfg: MoneyflowSignalConfig | None = None,
 ) -> str:
-    """Build a standalone A-share moneyflow quant strategy report."""
+    """Build an A-share entry/exit timing report; never place real orders."""
+
     cfg = cfg or MoneyflowSignalConfig()
     end_dt = datetime.strptime(analysis_date, "%Y-%m-%d")
     start_dt = end_dt - relativedelta(days=cfg.lookback_calendar_days)
@@ -151,84 +527,121 @@ def build_quant_strategy_report(
     try:
         ts_code = _tushare_symbol(symbol)
         ohlcv = _load_tushare_ohlcv(symbol, start_date, analysis_date)
+        ohlcv, prices_adjusted = _apply_forward_adjustment(symbol, ohlcv, start_date, analysis_date)
         moneyflow = _load_tushare_moneyflow(symbol, start_date, analysis_date)
     except (NoMarketDataError, TushareUnavailableError, ValueError) as exc:
         return _format_unavailable_report(symbol, analysis_date, exc)
 
     merged = pd.merge(ohlcv, moneyflow, on="Date", how="inner").sort_values("Date")
-    if len(merged) <= cfg.prev_amount_window:
+    minimum_rows = max(cfg.prev_amount_window, cfg.trend_ma_window, cfg.atr_window) + cfg.flow_window
+    if len(merged) < minimum_rows:
         return _format_unavailable_report(
             symbol,
             analysis_date,
             NoMarketDataError(symbol, symbol, "not enough joined OHLCV + moneyflow rows"),
         )
 
-    # Tushare daily amount is commonly returned in thousand CNY, while moneyflow
-    # amounts are in ten-thousand CNY. Convert turnover to ten-thousand CNY.
-    merged["TurnoverAmount10k"] = pd.to_numeric(merged["Amount"], errors="coerce") / 10.0
-    merged["Prev10AvgTurnover10k"] = merged["TurnoverAmount10k"].rolling(cfg.prev_amount_window).mean().shift(1)
-    merged["InflowToPrev10Turnover"] = merged["NetInflowAmount10k"] / merged["Prev10AvgTurnover10k"]
-    merged["TurnoverExpansion"] = merged["TurnoverAmount10k"] / merged["Prev10AvgTurnover10k"]
-    merged["MA20"] = merged["Close"].rolling(20).mean()
-    merged["ClosePctChange"] = merged["Close"].pct_change()
-
-    eligible = merged[
-        (merged["NetInflowAmount10k"] > 0)
-        & (merged["InflowToPrev10Turnover"] >= cfg.signal_threshold)
-    ].copy()
-
+    data = _prepare_indicators(merged, cfg)
+    latest = data.iloc[-1]
+    plans = _strategy_plans(data, cfg)
+    plan = plans[-1] if plans else None
+    signal_row = None
+    if plan is not None:
+        matching = data.index[data["Date"] == plan.signal_date].tolist()
+        signal_row = data.iloc[matching[0]] if matching else None
+    backtest = _backtest_summary(plans, cfg)
+    example_shares = _example_position_size(plan, cfg)
+    valuation = _load_relative_valuation(symbol, analysis_date, float(latest["Close"]), cfg)
+    entry_low, entry_high, entry_basis = _entry_zone(latest, signal_row, valuation, cfg)
     policy_gate, policy_hits = _material_change_gate(final_state)
-    latest = merged.iloc[-1]
-    recent = merged.tail(15)
+
+    signal = plan.status if plan else "NO_BUY_SIGNAL"
+    reason = plan.reason if plan else "当前回看区间没有通过资金流、趋势、流动性和追高过滤的入场信号。"
+    if signal == "PENDING_ENTRY" and float(latest["Close"]) > entry_high:
+        signal = "WAIT_FOR_ENTRY_PRICE"
+        reason = "资金流条件已出现，但当前价格高于基本面与 ATR 共同约束的建议买入上限，等待价格进入区间。"
+    if policy_hits and signal in ("PENDING_ENTRY", "WAIT_FOR_ENTRY_PRICE", "ACTIVE_HOLD_MONITOR"):
+        signal = "FUNDAMENTAL_REVIEW_REQUIRED"
+        reason = "基本面或政策文本出现重大变化关键词；暂停新增入场，并人工复核现有观察仓位。"
+
+    suggested_exit = None
+    if plan:
+        if plan.exit_price is not None:
+            suggested_exit = plan.exit_price
+        elif plan.current_exit is not None:
+            suggested_exit = plan.current_exit
 
     lines = [
-        f"# A-share Moneyflow Quant Strategy Report: {symbol}",
+        f"# A-share Entry/Exit Timing Report: {symbol}",
         "",
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
         f"Analysis date: {analysis_date}",
         f"Tushare code: {ts_code}",
         "",
-        "## Strategy Rule",
+        "> This strategy only provides entry/exit timing and reference prices. It does not connect to a broker or place live orders.",
         "",
-        "- Day 0 buy signal: net inflow >= 5% of the previous 10 trading days' average turnover.",
-        "- Entry reference: Day 0 close.",
-        "- Take profit: latest/live price >= Day 0 close * 1.20.",
-        "- Risk exit: latest/live price <= Day 0 close * 0.85.",
-        "- The signal should be used only when policy and fundamentals have no material change.",
+        "## Current Decision",
         "",
-        "## Current Signal",
-        "",
+        f"Signal: {signal}",
+        f"Reason: {reason}",
+        f"- Suggested entry zone: {entry_low:.2f} - {entry_high:.2f}",
+        f"- Entry pricing basis: {entry_basis}",
+        f"- Latest close: {float(latest['Close']):.2f} ({latest['Date'].strftime('%Y-%m-%d')})",
     ]
 
-    if eligible.empty:
+    if signal_row is not None:
         lines.extend(
             [
-                "Signal: NO_BUY_SIGNAL",
-                "",
-                "No trading day in the available lookback window met the 5% net-inflow trigger.",
+                f"- Day 0: {signal_row['Date'].strftime('%Y-%m-%d')}",
+                f"- Day 0 close: {float(signal_row['Close']):.2f}",
+                f"- 3-day net inflow: {float(signal_row['FlowSum']):.2f} 万元",
+                f"- Positive flow days: {int(signal_row['PositiveFlowDays'])}/{cfg.flow_window}",
+                f"- Net inflow / matched turnover: {float(signal_row['FlowIntensity']):.2%}",
+                f"- Turnover expansion: {float(signal_row['TurnoverExpansion']):.2f}x",
             ]
         )
+    if plan:
+        lines.extend(
+            [
+                f"- Reference entry date: {plan.entry_date.strftime('%Y-%m-%d') if plan.entry_date is not None else 'PENDING'}",
+                f"- Reference entry price: {plan.entry_price:.2f}" if plan.entry_price is not None else "- Reference entry price: PENDING_NEXT_TRADING_DAY",
+                f"- Take-profit level: {plan.take_profit:.2f}" if plan.take_profit is not None else "- Take-profit level: PENDING_ENTRY",
+                f"- Risk-exit level: {plan.initial_stop:.2f}" if plan.initial_stop is not None else "- Risk-exit level: PENDING_ENTRY",
+                f"- Current exit trigger: {plan.current_exit:.2f}" if plan.current_exit is not None else "- Current exit trigger: PENDING_ENTRY",
+                f"- Suggested exit price now: {suggested_exit:.2f}" if suggested_exit is not None else "- Suggested exit price now: NO_ACTIVE_POSITION",
+            ]
+        )
+        if plan.exit_date is not None:
+            lines.append(f"- Exit event date: {plan.exit_date.strftime('%Y-%m-%d')}")
+        if example_shares is not None:
+            lines.append(
+                f"- Example position limit: {example_shares} shares per ¥{cfg.example_capital:,.0f} capital "
+                f"at {cfg.risk_budget_pct:.0%} risk and {cfg.max_position_pct:.0%} position cap"
+            )
     else:
-        latest_signal = eligible.iloc[-1]
-        status, status_reason = _signal_status(latest_signal, latest, cfg)
-        take_profit = float(latest_signal["Close"]) * (1 + cfg.take_profit_pct)
-        stop_loss = float(latest_signal["Close"]) * (1 - cfg.stop_loss_pct)
         lines.extend(
             [
-                f"Signal: {status}",
-                f"Reason: {status_reason}",
-                "",
-                f"- Day 0: {latest_signal['Date'].strftime('%Y-%m-%d')}",
-                f"- Day 0 close: {latest_signal['Close']:.2f}",
-                f"- Net inflow: {latest_signal['NetInflowAmount10k']:.2f} 万元",
-                f"- Previous 10-day average turnover: {latest_signal['Prev10AvgTurnover10k']:.2f} 万元",
-                f"- Net inflow / previous 10-day average turnover: {latest_signal['InflowToPrev10Turnover']:.2%}",
-                f"- Turnover expansion vs previous 10-day average: {latest_signal['TurnoverExpansion']:.2f}x",
-                f"- Take-profit level: {take_profit:.2f}",
-                f"- Risk-exit level: {stop_loss:.2f}",
-                f"- Latest close: {latest['Close']:.2f} ({latest['Date'].strftime('%Y-%m-%d')})",
+                "- Reference entry date: NO_ACTIVE_SIGNAL",
+                "- Reference entry price: NO_ACTIVE_SIGNAL",
+                "- Take-profit level: NO_ACTIVE_POSITION",
+                "- Risk-exit level: NO_ACTIVE_POSITION",
+                "- Current exit trigger: NO_ACTIVE_POSITION",
+                "- Suggested exit price now: NO_ACTIVE_POSITION",
             ]
         )
+
+    lines.extend(["", "## Fundamental Relative Valuation", ""])
+    if valuation.get("available"):
+        lines.extend(
+            [
+                f"- Relative fair value: {valuation['fairValue']:.2f}",
+                f"- Fundamental entry ceiling after {cfg.margin_of_safety_pct:.0%} safety margin: {valuation['entryCeiling']:.2f}",
+                f"- Method: {valuation['method']}",
+            ]
+        )
+        lines.extend(f"- Evidence: {detail}" for detail in valuation["details"])
+    else:
+        lines.append(f"- {valuation.get('reason', 'relative valuation unavailable')}")
 
     lines.extend(
         [
@@ -241,81 +654,75 @@ def build_quant_strategy_report(
     if policy_hits:
         lines.append(f"Matched keywords: {', '.join(policy_hits)}")
 
+    lines.extend(["", "## Lookback Backtest Snapshot", ""])
+    if backtest["trades"]:
+        lines.extend(
+            [
+                f"- Completed non-overlapping trades: {backtest['trades']}",
+                f"- Win rate: {backtest['winRate']:.2%}",
+                f"- Average return after modeled costs: {backtest['averageReturn']:.2%}",
+                f"- Compounded return after modeled costs: {backtest['totalReturn']:.2%}",
+            ]
+        )
+    else:
+        lines.append("- No completed non-overlapping trade in the loaded lookback window.")
+    lines.append("- This is an in-sample single-stock diagnostic, not portfolio-level or out-of-sample proof.")
+
     lines.extend(
         [
             "",
-            "## Secondary A-share Quant Checks",
+            "## Strategy and Execution Rules",
             "",
-            _format_secondary_checks(latest),
+            f"- Signal: {cfg.flow_window}-day net inflow intensity >= {cfg.signal_threshold:.1%}, with at least {cfg.min_positive_flow_days} positive-flow days.",
+            f"- Confirmation: turnover expansion >= {cfg.min_turnover_expansion:.2f}x, close >= MA{cfg.trend_ma_window}, and one-day move < {cfg.max_chase_pct:.0%}.",
+            "- Entry: next trading day open plus configured slippage; Day 0 close is never treated as an executable fill.",
+            f"- Initial risk: {cfg.atr_stop_multiple:.1f} ATR, bounded to {cfg.minimum_stop_pct:.0%}-{cfg.maximum_stop_pct:.0%} of entry price.",
+            f"- Take profit: {cfg.reward_risk_ratio:.1f}R; trailing risk line: peak close minus {cfg.trailing_atr_multiple:.1f} ATR.",
+            f"- Time exit: {cfg.monitor_days} calendar days.",
+            f"- Cost assumptions: {cfg.slippage_bps:.0f} bps one-way slippage and {cfg.round_trip_cost_bps:.0f} bps round-trip costs for time-exit estimate.",
+            f"- Price adjustment: {'forward-adjusted with Tushare adj_factor' if prices_adjusted else 'raw prices; adj_factor unavailable, review corporate actions manually'}.",
+            "- Same-bar ambiguity: if stop and target are both touched, the stop is assumed first.",
             "",
             "## Recent 15 Trading Days",
             "",
-            "| Date | Close | Net inflow (万元) | Prev 10-day avg turnover (万元) | Inflow ratio | Turnover expansion | Signal |",
+            "| Date | Close | Net inflow (万元) | Prev avg turnover (万元) | Flow intensity | Turnover expansion | Signal |",
             "|---|---:|---:|---:|---:|---:|---|",
         ]
     )
-    for _, row in recent.iterrows():
-        is_signal = (
-            pd.notna(row.get("InflowToPrev10Turnover"))
-            and row["NetInflowAmount10k"] > 0
-            and row["InflowToPrev10Turnover"] >= cfg.signal_threshold
-        )
+    for _, row in data.tail(15).iterrows():
         lines.append(
             "| {date} | {close:.2f} | {net:.2f} | {avg:.2f} | {ratio:.2%} | {exp:.2f}x | {signal} |".format(
                 date=row["Date"].strftime("%Y-%m-%d"),
                 close=float(row["Close"]),
                 net=float(row["NetInflowAmount10k"]),
-                avg=float(row["Prev10AvgTurnover10k"]) if pd.notna(row["Prev10AvgTurnover10k"]) else 0.0,
-                ratio=float(row["InflowToPrev10Turnover"]) if pd.notna(row["InflowToPrev10Turnover"]) else 0.0,
+                avg=float(row["PrevAvgTurnover10k"]) if pd.notna(row["PrevAvgTurnover10k"]) else 0.0,
+                ratio=float(row["FlowIntensity"]) if pd.notna(row["FlowIntensity"]) else 0.0,
                 exp=float(row["TurnoverExpansion"]) if pd.notna(row["TurnoverExpansion"]) else 0.0,
-                signal="BUY_TRIGGER" if is_signal else "",
+                signal="BUY_TRIGGER" if bool(row["BuyTrigger"]) else "",
             )
         )
 
     lines.extend(
         [
             "",
-            "## Monitoring Instructions",
+            "## Usage Boundary",
             "",
-            "Use this file as the strategy baseline. For realtime monitoring, update the latest price and latest net inflow, then apply:",
-            "",
-            "1. If no active signal exists, wait until a trading day closes with net inflow >= 5% of the previous 10-day average turnover.",
-            "2. Once active, use Day 0 close as the reference price.",
-            "3. Sell/take profit when live or close price is 20% above Day 0 close.",
-            "4. Reduce or close when live or close price is 15% below Day 0 close.",
-            "5. Suppress or downgrade the signal if fresh policy/fundamental news materially changes the original thesis.",
+            "- The suggested entry zone is a research reference, not a guaranteed fair value or fill price.",
+            "- The suggested exit price is the currently active rule boundary or recorded exit estimate, not a live sell order.",
+            "- Recalculate after the trading day closes and verify announcements, liquidity, limit rules and actual quotes before acting.",
         ]
     )
     return "\n".join(lines).rstrip() + "\n"
 
 
-def _format_secondary_checks(latest: pd.Series) -> str:
-    checks = []
-    turnover_expansion = latest.get("TurnoverExpansion")
-    if pd.notna(turnover_expansion):
-        checks.append(
-            f"- Liquidity confirmation: latest turnover is {float(turnover_expansion):.2f}x the previous 10-day average."
-        )
-    ma20 = latest.get("MA20")
-    if pd.notna(ma20):
-        trend = "above" if latest["Close"] >= ma20 else "below"
-        checks.append(f"- Trend filter: latest close is {trend} MA20 ({float(ma20):.2f}).")
-    pct = latest.get("ClosePctChange")
-    if pd.notna(pct):
-        if abs(float(pct)) >= 0.08:
-            checks.append("- Chase-risk filter: latest one-day move is large; avoid chasing if the signal has already been priced in.")
-        else:
-            checks.append("- Chase-risk filter: latest one-day move is not an extreme limit-style move.")
-    return "\n".join(checks) if checks else "- Not enough recent data for secondary checks."
-
-
 def _format_unavailable_report(symbol: str, analysis_date: str, error: Exception) -> str:
     return (
-        f"# A-share Moneyflow Quant Strategy Report: {symbol}\n\n"
+        f"# A-share Entry/Exit Timing Report: {symbol}\n\n"
         f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         f"Analysis date: {analysis_date}\n\n"
         "Signal: DATA_UNAVAILABLE\n\n"
-        f"Could not generate the moneyflow strategy report: {type(error).__name__}: {error}\n\n"
-        "Check TUSHARE_TOKEN, Tushare moneyflow permission, and network access. "
-        "The moneyflow interface may require higher Tushare points than basic daily OHLCV data.\n"
+        f"Reason: Could not generate the strategy report: {type(error).__name__}: {error}\n\n"
+        "- Suggested entry zone: DATA_UNAVAILABLE\n"
+        "- Suggested exit price now: DATA_UNAVAILABLE\n\n"
+        "This strategy only provides entry/exit timing. It never places live orders.\n"
     )

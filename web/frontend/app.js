@@ -25,7 +25,12 @@ function badgeClass(value) {
 
 function displayQuantSignal(value) {
   const labels = {
-    ACTIVE_BUY_OR_HOLD: "买入 / 持有",
+    ACTIVE_BUY_OR_HOLD: "持有 / 监控退场",
+    ACTIVE_HOLD_MONITOR: "持有 / 监控退场",
+    PENDING_ENTRY: "等待下一交易日入场",
+    WAIT_FOR_ENTRY_PRICE: "等待进入建议买入区间",
+    ENTRY_BLOCKED_LIMIT_UP: "涨停附近无法入场",
+    FUNDAMENTAL_REVIEW_REQUIRED: "基本面复核 / 暂停入场",
     SELL_TAKE_PROFIT: "止盈",
     REDUCE_OR_EXIT: "减仓 / 退出",
     NO_BUY_SIGNAL: "无买入信号",
@@ -465,10 +470,16 @@ function updateDashboard(report) {
 
   $("metricQuantSignal").textContent = displayQuantSignal(quant.signal);
   $("metricReason").textContent = quant.reason || "暂无量化摘要";
-  $("metricDay0").textContent = quant.day0 || "-";
-  $("metricNetInflow").textContent = `净流入 ${quant.netInflow || "-"}`;
-  $("metricLevels").textContent = [quant.takeProfit, quant.riskExit].filter(Boolean).join(" / ") || "-";
-  $("metricLatestClose").textContent = `最新收盘 ${quant.latestClose || "-"}`;
+  $("metricDay0").textContent = quant.entryZone || quant.day0 || "-";
+  $("metricNetInflow").textContent = [
+    quant.entryPrice ? `T+1参考 ${quant.entryPrice}` : "",
+    quant.day0 ? `Day 0 ${quant.day0}` : "",
+  ].filter(Boolean).join(" / ") || "等待入场评估";
+  $("metricLevels").textContent = quant.suggestedExit || quant.currentExit || quant.riskExit || "-";
+  $("metricLatestClose").textContent = [
+    quant.takeProfit ? `止盈 ${quant.takeProfit}` : "",
+    quant.riskExit ? `初始风控 ${quant.riskExit}` : "",
+  ].filter(Boolean).join(" / ") || `最新收盘 ${quant.latestClose || "-"}`;
   $("metricDecision").textContent = decision;
   $("metricModified").textContent = report?.modified ? `更新 ${report.modified}` : "-";
 
