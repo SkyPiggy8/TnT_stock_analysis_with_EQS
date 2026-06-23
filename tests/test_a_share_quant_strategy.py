@@ -104,6 +104,7 @@ class TestAShareQuantStrategy(unittest.TestCase):
         self.assertIn("Day 0 close is never treated as an executable fill", report)
         self.assertIn("- Example position limit:", report)
         self.assertIn("## Lookback Backtest Snapshot", report)
+        self.assertIn("## Recent 120 Trading Days", report)
 
     def test_historical_stop_remains_exit_after_later_price_recovery(self):
         dates, daily, moneyflow = _market_frames()

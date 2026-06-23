@@ -10,6 +10,7 @@
 - 接入财联社、同花顺等中文资讯，减少只依赖海外新闻源造成的信息偏差。
 - 通过行情、新闻、基本面、情绪、研究辩论和风险管理生成完整股票报告。
 - 提供独立的 A 股资金流量化策略，输出参考买入价、止盈价和风险退出价。
+- 提供 A 股热点雷达，日终批量扫描沪深市场并生成行业 Top 10、个股 Top 30、资金流榜和大宗交易榜。
 - 提供本地 Web 看板，集中查看历史报告、量化信号、财务趋势、估值和抓取日志。
 - 支持 OpenAI、Qwen、DeepSeek、Gemini、Claude、GLM、MiniMax M3、OpenRouter 和 Ollama 等模型服务。
 - 支持 Apple Silicon macOS、Windows 和 Linux。
@@ -25,6 +26,7 @@
 5. 实现无需 Node.js 的本地 Web 看板及报告、量化、财务 API。
 6. 增强无数据处理、行情校验、环境变量配置、跨平台兼容和自动化测试。
 7. 增加 MiniMax 全球区/中国区支持，并加入 `MiniMax-M3` 模型选择与请求兼容处理。
+8. 增加全市场热点雷达、Parquet/DuckDB 缓存、日终报告、T+1 回测和 Windows 定时扫描。
 
 ## 工作流程
 
@@ -33,10 +35,13 @@ flowchart LR
     A[输入股票代码和日期] --> B[获取 A 股市场数据]
     B --> C[多智能体研究]
     B --> D[资金流量化策略]
+    B --> H[全市场热点雷达]
     C --> E[完整分析报告]
     D --> F[参考买入/止盈/退出价格]
+    H --> I[行业与个股热点榜]
     E --> G[本地 Web 看板]
     F --> G
+    I --> G
 ```
 
 ## 环境要求
@@ -243,7 +248,7 @@ reports/股票代码_时间/
 
 ## 启动本地 Web 看板
 
-先通过 CLI 至少保存一份报告，然后在仓库根目录运行：
+在仓库根目录运行。查看单股完整报告时应先通过 CLI 保存报告；只使用“A股热点”工作区不要求提前生成单股报告：
 
 ```bash
 python web/backend/server.py --host 127.0.0.1 --port 8765
@@ -272,6 +277,73 @@ http://127.0.0.1:8765
 “生成实时量化策略”表示按选择的日期重新请求最新可用日线数据并计算，不是盘中逐笔行情，也不会自动下单。
 
 回测面板使用证据等级而不是直接宣称策略有效：少于 5 笔已完成交易时固定显示 `INSUFFICIENT_SAMPLE`；样本达到要求后，才根据成本后收益、相对买入持有的超额收益和交易序列回撤给出样本内评价。即使显示 `PROMISING_IN_SAMPLE`，也只代表当前股票和当前窗口值得继续验证，不代表未来盈利保证。
+
+## A股热点雷达
+
+热点雷达是与单股策略并行运行的日终全市场筛选模块。它按交易日批量请求 Tushare 全市场数据，不会逐只股票调用接口，也不会批量调用 LLM。默认扫描沪深主板、创业板和科创板，并排除 ST、北交所、上市不足 60 天、日成交额不足 5000 万元或流通市值不足 20 亿元的股票。
+
+首次使用先确保安装了新增的数据缓存依赖：
+
+```powershell
+pip install -e .
+```
+
+### 打开热点雷达可视化 Web
+
+在 `TradingAgents` 项目根目录启动本地服务：
+
+```powershell
+python web/backend/server.py --host 127.0.0.1 --port 8765
+```
+
+保持该 PowerShell 窗口运行，然后用浏览器打开：
+
+```text
+http://127.0.0.1:8765/#hotspots
+```
+
+也可以先打开 `http://127.0.0.1:8765`，再点击页面顶部的 **A股热点**。进入后：
+
+1. 点击右上角交易日期打开日历。
+2. 黄色日期表示热点榜已经生成，可以直接查看。
+3. 蓝色日期表示本地已有全市场行情缓存，选择后点击“生成所选日期热点榜”。
+4. 点击榜单中的“单股分析”，才会切换到独立的单股量化与财务分析工作区。
+
+如果修改过 Web 代码或后端代码，需要先在旧服务窗口按 `Ctrl+C`，再重新执行启动命令。
+
+每天收盘后运行：
+
+```powershell
+python scripts/run_hotspot_scan.py --trade-date 20260618
+```
+
+首次扫描会补齐 120 个交易日的 `daily`、`daily_basic` 和 `moneyflow` 缓存，因此耗时较长；之后只下载缺失交易日。原始数据默认保存到 `~/.tradingagents/hotspot_monitor/raw/`，DuckDB 数据库保存到 `~/.tradingagents/hotspot_monitor/hotspot_monitor.duckdb`，报告保存到：
+
+```text
+reports/hotspot/YYYYMMDD/daily_signal_report.md
+reports/hotspot/YYYYMMDD/daily_signal_report.xlsx
+```
+
+历史数据与基础 T+1 回测：
+
+```powershell
+python scripts/update_hotspot_history.py --start-date 20240101 --end-date 20260618
+python scripts/run_hotspot_backtest.py --start-date 20240101 --end-date 20260618 --holding-days 1,3,5,10
+```
+
+回测以信号日后的下一交易日开盘价作为模拟入场价，分别统计 1/3/5/10 日收益、胜率以及行业和流通市值分组；次日停牌、涨停无法买入、持有期末停牌或跌停无法退出会单独标记并排除出对应的可执行样本。
+
+Windows 可以安装工作日晚间 19:30 的任务计划。脚本只负责注册任务，必须由用户主动运行：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts/install_hotspot_task.ps1 `
+  -PythonExe "$env:USERPROFILE\.conda\envs\tradingagents\python.exe" `
+  -RunAt "19:30"
+```
+
+Web 看板把“单股量化”和“A股热点”拆分为两个独立工作区。热点工作区通过日历展示本地已有全市场数据的交易日：黄色日期已经生成热点榜，蓝色日期已有行情缓存、可点击后生成该日榜单。页面展示市场概览、板块共振 Top 10、综合个股 Top 30、资金流榜和大宗交易榜。点击“单股分析”才会切换到单股工作区并带入量化策略与财务快照，不会自动启动多智能体 LLM 研究。
+
+热点评分由资金流、大单/特大单、大宗交易、成交额与流动性、技术面和板块共振组成。它只用于缩小研究范围，不代表买入建议，也不会产生真实订单。
 
 ## 常见问题
 
@@ -310,10 +382,13 @@ python -m pytest -q
 ```text
 TnT_stock_analysis_with_EQS/
 ├── cli/                         # 交互式分析入口
+├── config/                      # 热点雷达参数与行业映射模板
+├── scripts/                     # 热点扫描、回测与任务计划脚本
 ├── tradingagents/
 │   ├── agents/                  # 分析、研究、交易与风险角色
 │   ├── dataflows/               # A 股数据、新闻、财务与量化策略
 │   ├── graph/                   # 多智能体工作流
+│   ├── hotspot_monitor/         # 全市场热点扫描、评分、报告与回测
 │   └── llm_clients/             # 模型服务与能力适配
 ├── web/
 │   ├── backend/                 # 本地 HTTP API

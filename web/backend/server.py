@@ -6,7 +6,9 @@ import mimetypes
 import os
 import re
 import sys
+import threading
 import time
+import uuid
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,10 +25,15 @@ if str(ROOT) not in sys.path:
 
 from tradingagents.dataflows.a_share_quant_strategy import build_quant_strategy_report  # noqa: E402
 from tradingagents.dataflows.tushare_fundamentals import build_fundamental_snapshot  # noqa: E402
+from tradingagents.hotspot_monitor import HotspotMonitor, load_hotspot_config  # noqa: E402
 
 
 _FUNDAMENTAL_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
 _FUNDAMENTAL_CACHE_TTL_SECONDS = 300
+_HOTSPOT_MONITOR: HotspotMonitor | None = None
+_HOTSPOT_MONITOR_LOCK = threading.Lock()
+_HOTSPOT_JOBS: dict[str, dict] = {}
+_HOTSPOT_JOBS_LOCK = threading.Lock()
 
 
 def _load_dotenv() -> None:
@@ -43,6 +50,88 @@ def _load_dotenv() -> None:
         os.environ.setdefault(key, value)
 
 
+def _get_hotspot_monitor() -> HotspotMonitor:
+    global _HOTSPOT_MONITOR
+    if _HOTSPOT_MONITOR is None:
+        with _HOTSPOT_MONITOR_LOCK:
+            if _HOTSPOT_MONITOR is None:
+                _HOTSPOT_MONITOR = HotspotMonitor(load_hotspot_config())
+    return _HOTSPOT_MONITOR
+
+
+def _hotspot_job_snapshot(job_id: str) -> dict:
+    with _HOTSPOT_JOBS_LOCK:
+        if job_id not in _HOTSPOT_JOBS:
+            raise FileNotFoundError(job_id)
+        return dict(_HOTSPOT_JOBS[job_id])
+
+
+def _start_hotspot_job(trade_date: str | None) -> dict:
+    job_id = uuid.uuid4().hex
+    job = {
+        "jobId": job_id,
+        "status": "queued",
+        "tradeDate": trade_date or "latest",
+        "stage": "queued",
+        "current": 0,
+        "total": 0,
+        "progress": 0,
+        "message": "等待开始",
+        "startedAt": datetime.now().isoformat(timespec="seconds"),
+        "finishedAt": None,
+        "error": None,
+    }
+    with _HOTSPOT_JOBS_LOCK:
+        active = next(
+            (
+                dict(item)
+                for item in _HOTSPOT_JOBS.values()
+                if item["status"] in {"queued", "running"}
+            ),
+            None,
+        )
+        if active:
+            return {**active, "alreadyRunning": True}
+        _HOTSPOT_JOBS[job_id] = job
+
+    def run() -> None:
+        def progress(stage: str, current: int, total: int, message: str) -> None:
+            with _HOTSPOT_JOBS_LOCK:
+                item = _HOTSPOT_JOBS[job_id]
+                item.update(
+                    status="running",
+                    stage=stage,
+                    current=current,
+                    total=total,
+                    progress=round(current / total * 100, 1) if total else 0,
+                    message=message,
+                )
+
+        try:
+            result = _get_hotspot_monitor().scan(trade_date, progress=progress)
+            with _HOTSPOT_JOBS_LOCK:
+                _HOTSPOT_JOBS[job_id].update(
+                    status="complete",
+                    stage="complete",
+                    progress=100,
+                    message="扫描完成",
+                    tradeDate=result["tradeDate"],
+                    finishedAt=datetime.now().isoformat(timespec="seconds"),
+                )
+        except Exception as exc:  # noqa: BLE001 - background job boundary
+            with _HOTSPOT_JOBS_LOCK:
+                _HOTSPOT_JOBS[job_id].update(
+                    status="failed",
+                    stage="failed",
+                    message="扫描失败",
+                    error=f"{type(exc).__name__}: {exc}",
+                    finishedAt=datetime.now().isoformat(timespec="seconds"),
+                )
+
+    threading.Thread(target=run, name=f"hotspot-{job_id[:8]}", daemon=True).start()
+    return dict(job)
+
+
 def _json_response(handler: BaseHTTPRequestHandler, payload: dict, status: int = 200) -> None:
     body = json.dumps(payload, ensure_ascii=False, indent=2).encode("utf-8")
     handler.send_response(status)
@@ -51,6 +140,18 @@ def _json_response(handler: BaseHTTPRequestHandler, payload: dict, status: int =
     handler.send_header("Content-Length", str(len(body)))
     handler.end_headers()
     handler.wfile.write(body)
+
+
+def _read_json_body(handler: BaseHTTPRequestHandler, max_bytes: int = 65_536) -> dict:
+    length = int(handler.headers.get("Content-Length", "0") or 0)
+    if length > max_bytes:
+        raise ValueError("request body too large")
+    if length == 0:
+        return {}
+    payload = json.loads(handler.rfile.read(length).decode("utf-8"))
+    if not isinstance(payload, dict):
+        raise ValueError("JSON body must be an object")
+    return payload
 
 
 def _read_text(path: Path, limit: int | None = None) -> str:
@@ -306,6 +407,21 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return _json_response(self, {"ok": True, "reportsDir": str(REPORTS_DIR)})
             if path == "/api/reports":
                 return _json_response(self, {"reports": _list_reports()})
+            if path == "/api/hotspots/dates":
+                store = _get_hotspot_monitor().store
+                return _json_response(
+                    self,
+                    {
+                        "dates": store.available_raw_dates(),
+                        "scannedDates": store.available_dates(),
+                    },
+                )
+            if path.startswith("/api/hotspots/jobs/"):
+                job_id = path.removeprefix("/api/hotspots/jobs/").strip()
+                return _json_response(self, _hotspot_job_snapshot(job_id))
+            if path == "/api/hotspots":
+                trade_date = (query.get("date") or [""])[0] or None
+                return _json_response(self, _get_hotspot_monitor().load_result(trade_date))
             if path.startswith("/api/reports/"):
                 report_id = path.removeprefix("/api/reports/")
                 return _json_response(self, _report_payload(report_id))
@@ -320,6 +436,31 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._serve_static(path)
         except FileNotFoundError:
             return _json_response(self, {"error": "not_found"}, HTTPStatus.NOT_FOUND)
+        except Exception as exc:  # noqa: BLE001 - local diagnostic API
+            return _json_response(
+                self,
+                {"error": type(exc).__name__, "detail": str(exc)},
+                HTTPStatus.INTERNAL_SERVER_ERROR,
+            )
+
+    def do_POST(self) -> None:  # noqa: N802
+        parsed = urlparse(self.path)
+        try:
+            if parsed.path == "/api/hotspots/scan":
+                payload = _read_json_body(self)
+                trade_date = payload.get("tradeDate") or None
+                if trade_date and not re.fullmatch(r"\d{4}-?\d{2}-?\d{2}", str(trade_date)):
+                    raise ValueError("tradeDate must be YYYYMMDD or YYYY-MM-DD")
+                job = _start_hotspot_job(str(trade_date) if trade_date else None)
+                status = HTTPStatus.CONFLICT if job.get("alreadyRunning") else HTTPStatus.ACCEPTED
+                return _json_response(self, job, status)
+            return _json_response(self, {"error": "not_found"}, HTTPStatus.NOT_FOUND)
+        except ValueError as exc:
+            return _json_response(
+                self,
+                {"error": type(exc).__name__, "detail": str(exc)},
+                HTTPStatus.BAD_REQUEST,
+            )
         except Exception as exc:  # noqa: BLE001 - local diagnostic API
             return _json_response(
                 self,

@@ -32,6 +32,10 @@ dependencies = [
     "yfinance>=1.4.1",
     "tushare>=1.4.21",
     "akshare>=1.18.64",
+    "duckdb>=1.2.0",
+    "pyarrow>=18.0.0",
+    "pyyaml>=6.0.2",
+    "openpyxl>=3.1.5",
 ]
 
 [project.scripts]

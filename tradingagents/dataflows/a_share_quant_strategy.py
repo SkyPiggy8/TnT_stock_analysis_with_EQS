@@ -41,6 +41,7 @@ class MoneyflowSignalConfig:
     margin_of_safety_pct: float = 0.10
     valuation_ratio_floor: float = 1 / 3
     valuation_ratio_ceiling: float = 3.0
+    chart_history_days: int = 120
     example_capital: float = 100_000.0
     risk_budget_pct: float = 0.01
     max_position_pct: float = 0.20
@@ -795,13 +796,13 @@ def build_quant_strategy_report(
             f"- Price adjustment: {'forward-adjusted with Tushare adj_factor' if prices_adjusted else 'raw prices; adj_factor unavailable, review corporate actions manually'}.",
             "- Same-bar ambiguity: if stop and target are both touched, the stop is assumed first.",
             "",
-            "## Recent 15 Trading Days",
+            f"## Recent {cfg.chart_history_days} Trading Days",
             "",
             "| Date | Close | Net inflow (万元) | Prev avg turnover (万元) | Flow intensity | Turnover expansion | Signal |",
             "|---|---:|---:|---:|---:|---:|---|",
         ]
     )
-    for _, row in data.tail(15).iterrows():
+    for _, row in data.tail(cfg.chart_history_days).iterrows():
         lines.append(
             "| {date} | {close:.2f} | {net:.2f} | {avg:.2f} | {ratio:.2%} | {exp:.2f}x | {signal} |".format(
                 date=row["Date"].strftime("%Y-%m-%d"),

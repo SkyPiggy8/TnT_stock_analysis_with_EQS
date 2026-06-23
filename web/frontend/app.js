@@ -4,6 +4,17 @@ const state = {
   activeSection: "complete",
   liveQuant: null,
   fundamentalSnapshot: null,
+  chartRange: 30,
+  chartHoverIndex: null,
+  hotspotData: null,
+  hotspotView: "stocks",
+  hotspotJobId: null,
+  hotspotAvailableDates: [],
+  hotspotScannedDates: [],
+  hotspotSelectedDate: "",
+  hotspotCalendarMonth: null,
+  singleWorkspaceInitialized: false,
+  hotspotWorkspaceInitialized: false,
 };
 
 const $ = (id) => document.getElementById(id);
@@ -174,10 +185,53 @@ function periodLabel(value) {
 
 function resizeCanvas(canvas) {
   const rect = canvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  canvas.width = Math.max(640, Math.floor(rect.width * dpr));
-  canvas.height = Math.max(260, Math.floor(rect.height * dpr));
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  canvas.width = Math.max(320, Math.floor(rect.width * dpr));
+  canvas.height = Math.max(280, Math.floor(rect.height * dpr));
   return dpr;
+}
+
+let flowChartModel = null;
+
+function formatFlowAxis(value) {
+  const abs = Math.abs(value);
+  if (abs >= 10000) return `${value < 0 ? "-" : ""}${(abs / 10000).toFixed(1)}亿`;
+  if (abs >= 1000) return `${value < 0 ? "-" : ""}${(abs / 1000).toFixed(1)}千万`;
+  return `${Math.round(value)}万`;
+}
+
+function updateChartReadout(row) {
+  $("chartReadoutDate").textContent = row?.date ? `交易日 ${row.date}` : "交易日 --";
+  $("chartReadoutClose").textContent = row?.close == null ? "--" : `¥${row.close.toFixed(2)}`;
+  $("chartReadoutFlow").textContent = row?.net == null
+    ? "--"
+    : `${row.net >= 0 ? "+" : ""}${row.net.toLocaleString("zh-CN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} 万元`;
+  $("chartReadoutFlow").className = row?.net == null ? "" : row.net >= 0 ? "positive" : "negative";
+}
+
+function visibleFlowRows(rows) {
+  const parsed = (rows || [])
+    .map((row) => ({
+      date: row.date,
+      close: parseNumber(row.close),
+      net: parseNumber(row.netInflow),
+      ratio: parsePercent(row.inflowRatio),
+      signal: row.signal,
+    }))
+    .filter((row) => row.close != null || row.net != null);
+  return state.chartRange > 0 ? parsed.slice(-state.chartRange) : parsed;
+}
+
+function setChartRange(days) {
+  state.chartRange = days;
+  state.chartHoverIndex = null;
+  document.querySelectorAll("#chartRangeControls button").forEach((button) => {
+    const active = Number(button.dataset.days) === days;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-pressed", String(active));
+  });
+  const quant = state.liveQuant?.summary || state.activeReport?.quantSummary || {};
+  drawChart(quant.rows || []);
 }
 
 function drawChart(rows) {
@@ -193,32 +247,13 @@ function drawChart(rows) {
   ctx.fillStyle = "#101319";
   ctx.fillRect(0, 0, w, h);
 
-  const left = 56;
-  const right = 18;
-  const top = 20;
-  const bottom = 42;
+  const left = 76;
+  const right = 64;
+  const top = 24;
+  const bottom = 50;
   const plotW = w - left - right;
   const plotH = h - top - bottom;
-
-  ctx.strokeStyle = "rgba(132,142,156,0.16)";
-  ctx.lineWidth = 1;
-  for (let i = 0; i <= 4; i += 1) {
-    const y = top + (plotH * i) / 4;
-    ctx.beginPath();
-    ctx.moveTo(left, y);
-    ctx.lineTo(left + plotW, y);
-    ctx.stroke();
-  }
-
-  const parsed = (rows || [])
-    .map((row) => ({
-      date: row.date,
-      close: parseNumber(row.close),
-      net: parseNumber(row.netInflow),
-      ratio: parsePercent(row.inflowRatio),
-      signal: row.signal,
-    }))
-    .filter((row) => row.close != null || row.net != null);
+  const parsed = visibleFlowRows(rows);
 
   if (!parsed.length) {
     ctx.fillStyle = "#848e9c";
@@ -226,41 +261,59 @@ function drawChart(rows) {
     ctx.fillText("暂无量化序列，生成实时策略后会显示资金异动图。", left, top + 48);
     $("chartBadge").className = "badge neutral";
     $("chartBadge").textContent = "NO DATA";
+    updateChartReadout(null);
+    flowChartModel = null;
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     return;
   }
 
-  const maxAbsNet = Math.max(...parsed.map((row) => Math.abs(row.net || 0)), 1);
+  const maxAbsNet = Math.max(...parsed.map((row) => Math.abs(row.net || 0)), 1) * 1.12;
   const closes = parsed.map((row) => row.close).filter((n) => n != null);
-  const minClose = Math.min(...closes);
-  const maxClose = Math.max(...closes);
-  const closeRange = Math.max(maxClose - minClose, 0.01);
-  const barGap = 6;
-  const barW = Math.max(5, plotW / parsed.length - barGap);
-  const zeroY = top + plotH * 0.62;
+  const rawMinClose = Math.min(...closes);
+  const rawMaxClose = Math.max(...closes);
+  const closePadding = Math.max((rawMaxClose - rawMinClose) * 0.10, rawMaxClose * 0.01, 0.02);
+  const minClose = rawMinClose - closePadding;
+  const maxClose = rawMaxClose + closePadding;
+  const closeRange = maxClose - minClose;
+  const step = plotW / parsed.length;
+  const barW = Math.max(2, Math.min(18, step * 0.62));
+  const zeroY = top + plotH / 2;
+  const xAt = (index) => left + step * (index + 0.5);
+  const netY = (value) => zeroY - ((value || 0) / maxAbsNet) * (plotH / 2);
+  const closeY = (value) => top + ((maxClose - value) / closeRange) * plotH;
 
-  ctx.strokeStyle = "rgba(240,185,11,0.42)";
-  ctx.setLineDash([5, 5]);
-  const thresholdY = top + plotH * 0.22;
-  ctx.beginPath();
-  ctx.moveTo(left, thresholdY);
-  ctx.lineTo(left + plotW, thresholdY);
-  ctx.stroke();
-  ctx.setLineDash([]);
-  ctx.fillStyle = "#f0b90b";
-  ctx.font = "11px system-ui";
-  ctx.fillText("3% FLOW INTENSITY", left + 4, thresholdY - 7);
+  ctx.font = "10px Arial, Microsoft YaHei, sans-serif";
+  ctx.lineWidth = 1;
+  for (let index = 0; index <= 4; index += 1) {
+    const y = top + (plotH * index) / 4;
+    const netTick = maxAbsNet - (index * maxAbsNet) / 2;
+    const priceTick = maxClose - (index * closeRange) / 4;
+    ctx.strokeStyle = index === 2 ? "rgba(234,236,239,0.34)" : "rgba(132,142,156,0.16)";
+    ctx.beginPath();
+    ctx.moveTo(left, y);
+    ctx.lineTo(left + plotW, y);
+    ctx.stroke();
+    ctx.fillStyle = "#848e9c";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    ctx.fillText(formatFlowAxis(netTick), left - 10, y);
+    ctx.textAlign = "left";
+    ctx.fillText(`¥${priceTick.toFixed(2)}`, left + plotW + 10, y);
+  }
 
   parsed.forEach((row, index) => {
-    const x = left + index * (plotW / parsed.length) + barGap / 2;
-    const barH = Math.abs((row.net || 0) / maxAbsNet) * plotH * 0.46;
-    const y = row.net >= 0 ? zeroY - barH : zeroY;
+    const x = xAt(index);
+    const y = netY(row.net);
     ctx.fillStyle = row.net >= 0 ? "rgba(246,70,93,0.78)" : "rgba(14,203,129,0.76)";
-    ctx.fillRect(x, y, barW, Math.max(2, barH));
-    if (index % Math.ceil(parsed.length / 5) === 0) {
-      ctx.fillStyle = "#5e6673";
-      ctx.font = "10px system-ui";
-      ctx.fillText(row.date.slice(5), x, h - 16);
+    ctx.fillRect(x - barW / 2, Math.min(y, zeroY), barW, Math.max(1.5, Math.abs(zeroY - y)));
+    if (String(row.signal || "").toUpperCase().includes("BUY")) {
+      ctx.fillStyle = "#fcd535";
+      ctx.beginPath();
+      ctx.moveTo(x, top + 2);
+      ctx.lineTo(x - 5, top + 10);
+      ctx.lineTo(x + 5, top + 10);
+      ctx.closePath();
+      ctx.fill();
     }
   });
 
@@ -269,12 +322,25 @@ function drawChart(rows) {
   ctx.beginPath();
   parsed.forEach((row, index) => {
     if (row.close == null) return;
-    const x = left + index * (plotW / parsed.length) + barW / 2;
-    const y = top + plotH - ((row.close - minClose) / closeRange) * plotH;
+    const x = xAt(index);
+    const y = closeY(row.close);
     if (index === 0) ctx.moveTo(x, y);
     else ctx.lineTo(x, y);
   });
   ctx.stroke();
+
+  const tickCount = Math.min(6, parsed.length);
+  const tickIndices = new Set();
+  for (let index = 0; index < tickCount; index += 1) {
+    tickIndices.add(Math.round((parsed.length - 1) * index / Math.max(tickCount - 1, 1)));
+  }
+  ctx.fillStyle = "#848e9c";
+  ctx.font = "10px Arial, Microsoft YaHei, sans-serif";
+  ctx.textAlign = "center";
+  ctx.textBaseline = "top";
+  tickIndices.forEach((index) => {
+    ctx.fillText(parsed[index].date.slice(5), xAt(index), top + plotH + 13);
+  });
 
   ctx.strokeStyle = "rgba(255,255,255,0.18)";
   ctx.beginPath();
@@ -283,9 +349,32 @@ function drawChart(rows) {
   ctx.lineTo(left + plotW, top + plotH);
   ctx.stroke();
 
+  const selectedIndex = state.chartHoverIndex == null
+    ? parsed.length - 1
+    : Math.max(0, Math.min(state.chartHoverIndex, parsed.length - 1));
+  const selected = parsed[selectedIndex];
+  const selectedX = xAt(selectedIndex);
+  ctx.strokeStyle = "rgba(234,236,239,0.48)";
+  ctx.setLineDash([3, 4]);
+  ctx.beginPath();
+  ctx.moveTo(selectedX, top);
+  ctx.lineTo(selectedX, top + plotH);
+  ctx.stroke();
+  ctx.setLineDash([]);
+  if (selected.close != null) {
+    ctx.fillStyle = "#fcd535";
+    ctx.beginPath();
+    ctx.arc(selectedX, closeY(selected.close), 4, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#101319";
+    ctx.stroke();
+  }
+  updateChartReadout(selected);
+
   const latestFlow = parsed.at(-1)?.net;
   $("chartBadge").className = latestFlow == null ? "badge watch" : latestFlow >= 0 ? "badge buy" : "badge sell";
   $("chartBadge").textContent = latestFlow == null ? "WATCH" : latestFlow >= 0 ? "LATEST INFLOW" : "LATEST OUTFLOW";
+  flowChartModel = { left, plotW, step, count: parsed.length };
   ctx.setTransform(1, 0, 0, 1, 0, 0);
 }
 
@@ -705,13 +794,273 @@ function updateDashboard(report) {
   updateTabs();
 }
 
-async function requestJson(url) {
-  const response = await fetch(url, { cache: "no-store" });
+async function requestJson(url, options = {}) {
+  const response = await fetch(url, { cache: "no-store", ...options });
   const data = await response.json();
   if (!response.ok) {
     throw new Error(data.detail || data.error || `HTTP ${response.status}`);
   }
   return data;
+}
+
+function hotspotPercent(value, signed = false) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  return `${signed && number > 0 ? "+" : ""}${(number * 100).toFixed(2)}%`;
+}
+
+function hotspotChange(value) {
+  const number = Number(value);
+  if (!Number.isFinite(number)) return "-";
+  return `${number > 0 ? "+" : ""}${number.toFixed(2)}%`;
+}
+
+function hotspotClass(value) {
+  const number = Number(value);
+  return !Number.isFinite(number) || number === 0 ? "" : number > 0 ? "hotspot-positive" : "hotspot-negative";
+}
+
+function setHotspotJob(text, kind = "neutral") {
+  const node = $("hotspotJobStatus");
+  node.dataset.kind = kind;
+  node.innerHTML = `<span class="pulse"></span><span>${escapeHtml(text)}</span>`;
+}
+
+function renderHotspotSectors(sectors) {
+  $("hotspotSectorBody").innerHTML = sectors?.length
+    ? sectors.map((sector, index) => `<tr>
+        <td>${index + 1}</td><td>${escapeHtml(sector.sector_name || "未分类")}</td>
+        <td class="hotspot-score">${Number(sector.sector_score || 0).toFixed(1)}</td>
+        <td>${Number(sector.triggered_stock_count || 0)}/${Number(sector.stock_count || 0)}</td>
+        <td class="${hotspotClass(sector.avg_net_flow_ratio)}">${hotspotPercent(sector.avg_net_flow_ratio, true)}</td>
+        <td>${Number(sector.avg_amount_ratio_20 || 0).toFixed(2)}x</td>
+      </tr>`).join("")
+    : '<tr><td colspan="6" class="table-empty">暂无板块结果</td></tr>';
+}
+
+function renderHotspotStocks() {
+  const data = state.hotspotData || {};
+  const rows = [...(data[state.hotspotView] || [])];
+  const sortKey = $("hotspotSort").value;
+  rows.sort((left, right) => Number(right[sortKey] ?? -Infinity) - Number(left[sortKey] ?? -Infinity));
+  $("hotspotStockBody").innerHTML = rows.length
+    ? rows.map((stock) => `<tr>
+        <td><span class="ticker-name">${escapeHtml(stock.name || stock.ts_code)}</span><span class="ticker-code">${escapeHtml(stock.ts_code)}</span></td>
+        <td>${escapeHtml(stock.sector_level_1 || "未分类")}</td>
+        <td class="hotspot-score">${Number(stock.stock_score || 0).toFixed(1)}</td>
+        <td class="${hotspotClass(stock.pct_chg)}">${hotspotChange(stock.pct_chg)}</td>
+        <td class="${hotspotClass(stock.net_flow_ratio)}">${hotspotPercent(stock.net_flow_ratio, true)}</td>
+        <td class="${hotspotClass(stock.big_elg_flow_ratio)}">${hotspotPercent(stock.big_elg_flow_ratio, true)}</td>
+        <td class="${hotspotClass(stock.block_vwap_premium)}">${hotspotPercent(stock.block_vwap_premium, true)}</td>
+        <td>${Number(stock.amount_ratio_20 || 0).toFixed(2)}x</td>
+        <td><button class="hotspot-analyze" type="button" data-ticker="${escapeHtml(stock.ts_code)}">单股分析</button></td>
+      </tr>`).join("")
+    : '<tr><td colspan="9" class="table-empty">当前榜单没有符合条件的股票</td></tr>';
+}
+
+function renderHotspot(data) {
+  state.hotspotData = data;
+  if (data?.tradeDate) state.hotspotSelectedDate = data.tradeDate;
+  const summary = data?.summary || {};
+  $("hotspotUniverse").textContent = summary.eligibleStocks ?? "-";
+  $("hotspotTriggered").textContent = summary.triggeredStocks ?? "-";
+  $("hotspotCoverage").textContent = summary.moneyflowCoverage == null ? "-" : hotspotPercent(summary.moneyflowCoverage);
+  $("hotspotBlocks").textContent = summary.blockTradeStocks ?? "-";
+  renderHotspotSectors(data?.sectors || []);
+  renderHotspotStocks();
+  if (data?.tradeDate) {
+    updateHotspotDateControls();
+    setHotspotJob(`已加载 ${formatHotspotDate(data.tradeDate)} 日终扫描结果`);
+  }
+}
+
+function formatHotspotDate(value) {
+  return String(value || "").replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3");
+}
+
+function hotspotMonthFromDate(value) {
+  const match = String(value || "").match(/^(\d{4})(\d{2})\d{2}$/);
+  return match ? new Date(Number(match[1]), Number(match[2]) - 1, 1) : new Date(new Date().getFullYear(), new Date().getMonth(), 1);
+}
+
+function hotspotMonthNumber(date) {
+  return date.getFullYear() * 12 + date.getMonth();
+}
+
+function updateHotspotDateControls() {
+  const selected = state.hotspotSelectedDate;
+  const scanned = state.hotspotScannedDates.includes(selected);
+  $("hotspotDateLabel").textContent = selected ? formatHotspotDate(selected) : "选择交易日";
+  $("runHotspotLabel").textContent = scanned ? "重新生成该日热点榜" : "生成所选日期热点榜";
+  renderHotspotCalendar();
+}
+
+function renderHotspotCalendar() {
+  const grid = $("hotspotCalendarGrid");
+  if (!grid) return;
+  const available = new Set(state.hotspotAvailableDates);
+  const scanned = new Set(state.hotspotScannedDates);
+  const month = state.hotspotCalendarMonth || hotspotMonthFromDate(state.hotspotSelectedDate);
+  state.hotspotCalendarMonth = month;
+  const year = month.getFullYear();
+  const monthIndex = month.getMonth();
+  $("hotspotCalendarTitle").textContent = `${year}年 ${monthIndex + 1}月`;
+  const dayCount = new Date(year, monthIndex + 1, 0).getDate();
+  const offset = (new Date(year, monthIndex, 1).getDay() + 6) % 7;
+  const today = new Date();
+  const todayKey = `${today.getFullYear()}${String(today.getMonth() + 1).padStart(2, "0")}${String(today.getDate()).padStart(2, "0")}`;
+  grid.innerHTML = Array.from({ length: dayCount }, (_, index) => {
+    const day = index + 1;
+    const key = `${year}${String(monthIndex + 1).padStart(2, "0")}${String(day).padStart(2, "0")}`;
+    const hasData = available.has(key);
+    const isScanned = scanned.has(key);
+    const classes = [hasData ? "available" : "", isScanned ? "scanned" : "", key === state.hotspotSelectedDate ? "selected" : "", key === todayKey ? "today" : ""].filter(Boolean).join(" ");
+    const firstStyle = index === 0 ? ` style="grid-column-start:${offset + 1}"` : "";
+    const title = isScanned ? "已生成热点榜" : hasData ? "已有行情缓存，点击选择" : "无本地数据";
+    return `<button type="button" class="${classes}" data-date="${key}" title="${title}"${firstStyle}${hasData ? "" : " disabled"}>${day}</button>`;
+  }).join("");
+
+  const monthNumbers = state.hotspotAvailableDates.map((date) => hotspotMonthNumber(hotspotMonthFromDate(date)));
+  const current = hotspotMonthNumber(month);
+  $("hotspotPrevMonth").disabled = !monthNumbers.length || current <= Math.min(...monthNumbers);
+  $("hotspotNextMonth").disabled = !monthNumbers.length || current >= Math.max(...monthNumbers);
+}
+
+function showHotspotPending(date) {
+  state.hotspotData = null;
+  for (const id of ["hotspotUniverse", "hotspotTriggered", "hotspotCoverage", "hotspotBlocks"]) $(id).textContent = "-";
+  $("hotspotSectorBody").innerHTML = '<tr><td colspan="6" class="table-empty">该日期尚未生成行业热点榜</td></tr>';
+  $("hotspotStockBody").innerHTML = '<tr><td colspan="9" class="table-empty">点击“生成所选日期热点榜”后显示</td></tr>';
+  setHotspotJob(`${formatHotspotDate(date)} 已有全市场行情缓存，尚未生成热点榜`);
+}
+
+async function selectHotspotDate(date) {
+  if (!state.hotspotAvailableDates.includes(date)) return;
+  state.hotspotSelectedDate = date;
+  state.hotspotCalendarMonth = hotspotMonthFromDate(date);
+  $("hotspotCalendarPanel").hidden = true;
+  $("hotspotCalendarToggle").setAttribute("aria-expanded", "false");
+  updateHotspotDateControls();
+  if (state.hotspotScannedDates.includes(date)) await loadHotspot(date);
+  else showHotspotPending(date);
+}
+
+async function loadHotspot(date = "") {
+  const query = date ? `?date=${encodeURIComponent(date)}` : "";
+  const data = await requestJson(`/api/hotspots${query}`);
+  renderHotspot(data);
+}
+
+async function loadHotspotDates(preferred = "") {
+  const data = await requestJson("/api/hotspots/dates");
+  state.hotspotAvailableDates = data.dates || [];
+  state.hotspotScannedDates = data.scannedDates || data.dates || [];
+  const requested = preferred || state.hotspotSelectedDate;
+  const selected = state.hotspotAvailableDates.includes(requested)
+    ? requested
+    : state.hotspotScannedDates[0] || state.hotspotAvailableDates[0] || "";
+  state.hotspotSelectedDate = selected;
+  state.hotspotCalendarMonth = hotspotMonthFromDate(selected);
+  updateHotspotDateControls();
+  if (!selected) {
+    setHotspotJob("本地数据库暂无可用交易日", "error");
+  } else if (state.hotspotScannedDates.includes(selected)) {
+    await loadHotspot(selected);
+  } else {
+    showHotspotPending(selected);
+  }
+}
+
+async function pollHotspotJob(jobId) {
+  state.hotspotJobId = jobId;
+  const button = $("runHotspotBtn");
+  button.disabled = true;
+  try {
+    for (;;) {
+      const job = await requestJson(`/api/hotspots/jobs/${encodeURIComponent(jobId)}`);
+      setHotspotJob(`${job.message || job.stage} · ${Number(job.progress || 0).toFixed(0)}%`, job.status === "failed" ? "error" : "running");
+      if (job.status === "complete") {
+        await loadHotspotDates(job.tradeDate);
+        return;
+      }
+      if (job.status === "failed") throw new Error(job.error || "热点扫描失败");
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+  } finally {
+    state.hotspotJobId = null;
+    button.disabled = false;
+  }
+}
+
+async function runHotspotScan() {
+  const tradeDate = state.hotspotSelectedDate || null;
+  if (!tradeDate) throw new Error("请先从热点日历选择一个有数据的交易日");
+  const response = await fetch("/api/hotspots/scan", {
+    method: "POST",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tradeDate }),
+  });
+  const job = await response.json();
+  if (!response.ok && response.status !== 409) throw new Error(job.detail || job.error || `HTTP ${response.status}`);
+  await pollHotspotJob(job.jobId);
+}
+
+async function analyzeHotspotTicker(ticker) {
+  if (!ticker) return;
+  const rawDate = state.hotspotData?.tradeDate || $("dateInput").value;
+  const date = String(rawDate).replace(/^(\d{4})(\d{2})(\d{2})$/, "$1-$2-$3");
+  $("tickerInput").value = ticker;
+  $("dateInput").value = date;
+  const needsReportList = !state.singleWorkspaceInitialized;
+  if (needsReportList) state.singleWorkspaceInitialized = true;
+  setWorkspace("single", "#market");
+  window.location.hash = "market";
+  setStatus(`正在接入 ${ticker} 的单股量化与财务分析`);
+  await Promise.all([runQuant(), loadFundamentals(ticker, date)]);
+  if (needsReportList) {
+    try {
+      await loadReports(false);
+    } catch (error) {
+      state.singleWorkspaceInitialized = false;
+      setStatus(`历史报告列表加载失败：${error.message}`, "error");
+    }
+  }
+}
+
+function setWorkspace(mode, activeHash = window.location.hash) {
+  const workspace = mode === "hotspot" ? "hotspot" : "single";
+  document.body.dataset.workspace = workspace;
+  document.querySelectorAll("nav a[data-workspace-target]").forEach((link) => {
+    const isActive = workspace === "hotspot"
+      ? link.dataset.workspaceTarget === "hotspot"
+      : link.dataset.workspaceTarget === "single"
+        && (link.closest(".mobile-workspace-nav") || link.getAttribute("href") === activeHash);
+    link.classList.toggle("active", isActive);
+  });
+  if (workspace === "single" && !document.querySelector("nav a.active[data-workspace-target]")) {
+    document.querySelectorAll('nav a[href="#overview"]').forEach((link) => link.classList.add("active"));
+  }
+  initializeWorkspace(workspace);
+}
+
+function initializeWorkspace(workspace) {
+  if (workspace === "hotspot") {
+    if (state.hotspotWorkspaceInitialized) return;
+    state.hotspotWorkspaceInitialized = true;
+    loadHotspotDates().catch((error) => {
+      state.hotspotWorkspaceInitialized = false;
+      setHotspotJob(`热点雷达初始化失败：${error.message}`, "error");
+    });
+    return;
+  }
+  if (state.singleWorkspaceInitialized) return;
+  state.singleWorkspaceInitialized = true;
+  loadReports().catch((error) => {
+    state.singleWorkspaceInitialized = false;
+    setStatus(`初始化失败：${error.message}`, "error");
+    updateDashboard(null);
+  });
 }
 
 async function loadReport(reportId) {
@@ -750,7 +1099,7 @@ async function loadFundamentals(ticker, date, silent = false) {
   }
 }
 
-async function loadReports() {
+async function loadReports(loadFirst = true) {
   const data = await requestJson("/api/reports");
   state.reports = data.reports || [];
   const select = $("reportSelect");
@@ -758,11 +1107,13 @@ async function loadReports() {
     .map((report) => `<option value="${escapeHtml(report.id)}">${escapeHtml(report.id)}</option>`)
     .join("");
   if (!state.reports.length) {
-    setStatus("reports 目录下还没有可读取的 complete_report.md", "error");
-    updateDashboard(null);
+    if (loadFirst) {
+      setStatus("reports 目录下还没有可读取的 complete_report.md", "error");
+      updateDashboard(null);
+    }
     return;
   }
-  await loadReport(state.reports[0].id);
+  if (loadFirst) await loadReport(state.reports[0].id);
 }
 
 async function runQuant() {
@@ -816,16 +1167,86 @@ function bindEvents() {
     state.activeSection = button.dataset.section;
     updateTabs();
   });
+  $("runHotspotBtn").addEventListener("click", () => {
+    runHotspotScan().catch((error) => setHotspotJob(error.message, "error"));
+  });
+  $("hotspotCalendarToggle").addEventListener("click", () => {
+    const panel = $("hotspotCalendarPanel");
+    panel.hidden = !panel.hidden;
+    $("hotspotCalendarToggle").setAttribute("aria-expanded", String(!panel.hidden));
+    if (!panel.hidden) renderHotspotCalendar();
+  });
+  $("hotspotPrevMonth").addEventListener("click", () => {
+    const current = state.hotspotCalendarMonth || new Date();
+    state.hotspotCalendarMonth = new Date(current.getFullYear(), current.getMonth() - 1, 1);
+    renderHotspotCalendar();
+  });
+  $("hotspotNextMonth").addEventListener("click", () => {
+    const current = state.hotspotCalendarMonth || new Date();
+    state.hotspotCalendarMonth = new Date(current.getFullYear(), current.getMonth() + 1, 1);
+    renderHotspotCalendar();
+  });
+  $("hotspotCalendarGrid").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-date]:not(:disabled)");
+    if (button) selectHotspotDate(button.dataset.date).catch((error) => setHotspotJob(error.message, "error"));
+  });
+  $("hotspotSort").addEventListener("change", () => renderHotspotStocks());
+  $("hotspotViewTabs").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-view]");
+    if (!button) return;
+    state.hotspotView = button.dataset.view;
+    document.querySelectorAll("#hotspotViewTabs button").forEach((item) => item.classList.toggle("active", item === button));
+    renderHotspotStocks();
+  });
+  $("hotspotStockBody").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-ticker]");
+    if (button) analyzeHotspotTicker(button.dataset.ticker).catch((error) => setStatus(error.message, "error"));
+  });
+  $("chartRangeControls").addEventListener("click", (event) => {
+    const button = event.target.closest("button[data-days]");
+    if (button) setChartRange(Number(button.dataset.days));
+  });
+  $("flowChart").addEventListener("mousemove", (event) => {
+    if (!flowChartModel) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const x = event.clientX - rect.left;
+    const index = Math.floor((x - flowChartModel.left) / flowChartModel.step);
+    if (index < 0 || index >= flowChartModel.count || index === state.chartHoverIndex) return;
+    state.chartHoverIndex = index;
+    const quant = state.liveQuant?.summary || state.activeReport?.quantSummary || {};
+    drawChart(quant.rows || []);
+  });
+  $("flowChart").addEventListener("mouseleave", () => {
+    if (state.chartHoverIndex == null) return;
+    state.chartHoverIndex = null;
+    const quant = state.liveQuant?.summary || state.activeReport?.quantSummary || {};
+    drawChart(quant.rows || []);
+  });
+  $("flowChart").addEventListener("wheel", (event) => {
+    event.preventDefault();
+    const ranges = [10, 20, 30, 60, 0];
+    const current = Math.max(0, ranges.indexOf(state.chartRange));
+    const next = Math.max(0, Math.min(ranges.length - 1, current + (event.deltaY > 0 ? 1 : -1)));
+    if (next !== current) setChartRange(ranges[next]);
+  }, { passive: false });
   window.addEventListener("resize", () => {
     const quant = state.liveQuant?.summary || state.activeReport?.quantSummary || {};
     drawChart(quant.rows || []);
     drawBacktestChart(quant.backtestTrades || []);
     drawFundamentalChart(state.fundamentalSnapshot?.trends || []);
   });
+  document.addEventListener("click", (event) => {
+    const workspaceLink = event.target.closest("a[data-workspace-target]");
+    if (workspaceLink) setWorkspace(workspaceLink.dataset.workspaceTarget, workspaceLink.getAttribute("href"));
+    if (!event.target.closest(".hotspot-calendar")) {
+      $("hotspotCalendarPanel").hidden = true;
+      $("hotspotCalendarToggle").setAttribute("aria-expanded", "false");
+    }
+  });
+  window.addEventListener("hashchange", () => {
+    setWorkspace(window.location.hash === "#hotspots" ? "hotspot" : "single", window.location.hash);
+  });
 }
 
+setWorkspace(window.location.hash === "#hotspots" ? "hotspot" : "single", window.location.hash);
 bindEvents();
-loadReports().catch((error) => {
-  setStatus(`初始化失败：${error.message}`, "error");
-  updateDashboard(null);
-});

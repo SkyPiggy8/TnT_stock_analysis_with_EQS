@@ -7,7 +7,7 @@
     <title>TnT Nailong · A股策略终端</title>
     <link rel="stylesheet" href="/styles.css" />
   </head>
-  <body>
+  <body data-workspace="single">
     <svg class="svg-sprite" aria-hidden="true">
       <symbol id="i-logo" viewBox="0 0 24 24"><path d="M4 5h16M7 9h10M9 13h6M11 17h2"/><circle cx="12" cy="12" r="10"/></symbol>
       <symbol id="i-grid" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></symbol>
@@ -31,6 +31,7 @@
       <symbol id="i-coins" viewBox="0 0 24 24"><ellipse cx="9" cy="6" rx="6" ry="3"/><path d="M3 6v5c0 1.7 2.7 3 6 3s6-1.3 6-3V6M5 15c.9 1.2 3 2 5.5 2"/><path d="M13 11c4.4 0 8 1.3 8 3s-3.6 3-8 3M7 17v2c0 1.7 3.1 3 7 3s7-1.3 7-3v-5"/></symbol>
       <symbol id="i-building" viewBox="0 0 24 24"><path d="M4 21V5l8-3 8 3v16M2 21h20M8 7h2M14 7h2M8 11h2M14 11h2M8 15h2M14 15h2"/></symbol>
       <symbol id="i-news" viewBox="0 0 24 24"><path d="M4 4h15v16H5a3 3 0 0 1-3-3V6"/><path d="M2 6h2v11a2 2 0 0 0 2 2M8 8h7M8 12h7M8 16h4"/></symbol>
+      <symbol id="i-hot" viewBox="0 0 24 24"><path d="M13 2s1 4-2 7c-2-3-5-3-5-3s-2 4 0 8c-2-1-3-3-3-3s-1 8 7 11c8-1 11-6 10-11-1-4-5-7-5-7s1 4-2 6c1-4 0-8 0-8Z"/><path d="M9 19c-1-3 2-5 2-5s0 2 1 3c2-2 2-4 2-4s3 4 0 7"/></symbol>
       <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7h.01"/></symbol>
       <symbol id="i-check" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m8 12 2.5 2.5L16 9"/></symbol>
       <symbol id="i-alert" viewBox="0 0 24 24"><path d="m12 3 10 18H2L12 3Z"/><path d="M12 9v5M12 17h.01"/></symbol>
@@ -39,23 +40,28 @@
     </svg>
 
     <header class="global-nav">
-      <a class="nav-brand" href="#overview">
+      <a class="nav-brand" href="#overview" data-workspace-target="single">
         <span class="logo-tile"><img src="/nailong-avatar.png" alt="TnT Nailong 奶龙头像" /></span>
         <span class="brand-copy"><strong>TnT Nailong</strong><small>龙长牛角代表着牛市龙头，信奶龙，选好股</small></span>
       </a>
       <nav class="desktop-nav" aria-label="页面导航">
-        <a href="#overview"><svg><use href="#i-grid" /></svg>概览</a>
-        <a href="#market"><svg><use href="#i-chart" /></svg>行情</a>
-        <a href="#backtest"><svg><use href="#i-trophy" /></svg>回测</a>
-        <a href="#financials"><svg><use href="#i-building" /></svg>财务</a>
-        <a href="#research"><svg><use href="#i-file" /></svg>研报</a>
+        <a href="#overview" data-workspace-target="single"><svg><use href="#i-chart" /></svg>单股量化</a>
+        <a href="#hotspots" data-workspace-target="hotspot"><svg><use href="#i-hot" /></svg>A股热点</a>
+        <a href="#backtest" data-workspace-target="single"><svg><use href="#i-trophy" /></svg>回测</a>
+        <a href="#financials" data-workspace-target="single"><svg><use href="#i-building" /></svg>财务</a>
+        <a href="#research" data-workspace-target="single"><svg><use href="#i-file" /></svg>研报</a>
       </nav>
       <div class="nav-state"><span class="pulse"></span>LOCAL · READ ONLY</div>
     </header>
 
+    <nav class="mobile-workspace-nav" aria-label="功能工作区">
+      <a href="#overview" data-workspace-target="single"><svg><use href="#i-chart" /></svg>单股量化</a>
+      <a href="#hotspots" data-workspace-target="hotspot"><svg><use href="#i-hot" /></svg>A股热点</a>
+    </nav>
+
     <div class="app-shell">
       <aside class="side-panel">
-        <div class="side-title"><svg><use href="#i-grid" /></svg><span>分析控制台</span></div>
+        <div class="side-title"><svg><use href="#i-grid" /></svg><span>单股量化分析</span></div>
 
         <label class="field-label" for="reportSelect"><svg><use href="#i-history" /></svg>历史报告</label>
         <select id="reportSelect"></select>
@@ -124,14 +130,68 @@
           <article><span><svg><use href="#i-flow" /></svg>资金流强度</span><strong id="metricFlowRatio">-</strong><small id="metricNetAmount">3日净流入 -</small></article>
         </section>
 
+        <section id="hotspots" class="hotspot-section">
+          <div class="section-heading hotspot-heading">
+            <div class="panel-title"><span class="panel-icon hot"><svg><use href="#i-hot" /></svg></span><div><p class="eyebrow">MARKET-WIDE RADAR</p><h2>A股日终热点雷达</h2><p>全市场批量资金流、大宗交易、放量与板块共振筛选</p></div></div>
+            <div class="hotspot-actions">
+              <div class="hotspot-calendar">
+                <button id="hotspotCalendarToggle" class="hotspot-calendar-toggle" type="button" aria-expanded="false"><svg><use href="#i-calendar" /></svg><span id="hotspotDateLabel">选择交易日</span></button>
+                <div id="hotspotCalendarPanel" class="hotspot-calendar-panel" hidden>
+                  <div class="calendar-head"><button id="hotspotPrevMonth" type="button" aria-label="上个月">‹</button><strong id="hotspotCalendarTitle">-</strong><button id="hotspotNextMonth" type="button" aria-label="下个月">›</button></div>
+                  <div class="calendar-weekdays"><span>一</span><span>二</span><span>三</span><span>四</span><span>五</span><span>六</span><span>日</span></div>
+                  <div id="hotspotCalendarGrid" class="calendar-grid"></div>
+                  <div class="calendar-legend"><span><i class="ready"></i>已生成热点榜</span><span><i class="cached"></i>已有行情缓存</span></div>
+                </div>
+              </div>
+              <button id="runHotspotBtn" class="hotspot-run" type="button"><svg><use href="#i-refresh" /></svg><span id="runHotspotLabel">生成所选日期热点榜</span></button>
+            </div>
+          </div>
+          <div id="hotspotJobStatus" class="hotspot-job"><span class="pulse"></span><span>尚未加载热点扫描结果</span></div>
+          <div class="hotspot-summary">
+            <article><span>有效股票池</span><strong id="hotspotUniverse">-</strong><small>沪深 · 已过滤流动性</small></article>
+            <article><span>触发任一信号</span><strong id="hotspotTriggered">-</strong><small>资金流 / 大宗 / 放量</small></article>
+            <article><span>资金流覆盖率</span><strong id="hotspotCoverage">-</strong><small>moneyflow 数据完整度</small></article>
+            <article><span>大宗交易股票</span><strong id="hotspotBlocks">-</strong><small>当日存在成交记录</small></article>
+          </div>
+          <div class="hotspot-grid">
+            <article class="panel hotspot-sector-panel">
+              <div class="panel-head"><div class="panel-title"><span class="panel-icon yellow"><svg><use href="#i-building" /></svg></span><div><h2>板块共振 Top 10</h2><p>触发比例、资金流、涨幅、放量和大宗溢价</p></div></div></div>
+              <div class="table-scroll"><table class="hotspot-table"><thead><tr><th>#</th><th>板块</th><th>评分</th><th>触发/总数</th><th>平均净流入</th><th>放量</th></tr></thead><tbody id="hotspotSectorBody"><tr><td colspan="6" class="table-empty">暂无数据</td></tr></tbody></table></div>
+            </article>
+            <article class="panel hotspot-stock-panel">
+              <div class="panel-head hotspot-table-head">
+                <div class="panel-title"><span class="panel-icon hot"><svg><use href="#i-hot" /></svg></span><div><h2>热点个股 Top 30</h2><p>点击“单股分析”接入现有量化策略和财务快照</p></div></div>
+                <div class="hotspot-view-tabs" id="hotspotViewTabs"><button type="button" class="active" data-view="stocks">综合</button><button type="button" data-view="moneyflowTop">资金流</button><button type="button" data-view="blockTrades">大宗</button></div>
+              </div>
+              <div class="hotspot-sort"><label for="hotspotSort">排序</label><select id="hotspotSort"><option value="stock_score">综合评分</option><option value="net_flow_ratio">净流入比例</option><option value="big_elg_flow_ratio">大单比例</option><option value="block_vwap_premium">大宗溢价</option><option value="amount_ratio_20">成交额放大</option></select></div>
+              <div class="table-scroll"><table class="hotspot-table stock-table"><thead><tr><th>股票</th><th>行业</th><th>评分</th><th>涨跌</th><th>净流入</th><th>大单</th><th>大宗溢价</th><th>放量</th><th>操作</th></tr></thead><tbody id="hotspotStockBody"><tr><td colspan="9" class="table-empty">运行日终扫描后显示</td></tr></tbody></table></div>
+            </article>
+          </div>
+          <div class="evidence-warning hotspot-warning"><svg><use href="#i-info" /></svg><div><strong>热点不等于买点</strong><span>榜单只负责缩小研究范围；入场价格、风险退出与基本面仍由现有单股模块继续验证。</span></div></div>
+        </section>
+
         <section id="market" class="terminal-grid">
           <article class="panel chart-panel">
             <div class="panel-head">
               <div class="panel-title"><span class="panel-icon"><svg><use href="#i-chart" /></svg></span><div><h2>资金流与价格</h2><p>日线价格 · 资金净流入 · 入场触发</p></div></div>
               <span id="chartBadge" class="badge neutral">NO DATA</span>
             </div>
-            <div class="chart-legend"><span class="legend-price">价格</span><span class="legend-buy">净流入</span><span class="legend-sell">净流出</span></div>
-            <canvas id="flowChart" width="920" height="390"></canvas>
+            <div class="chart-toolbar">
+              <div class="chart-readout" aria-live="polite">
+                <span id="chartReadoutDate">交易日 --</span>
+                <span>收盘 <strong id="chartReadoutClose">--</strong></span>
+                <span>资金净额 <strong id="chartReadoutFlow">--</strong></span>
+              </div>
+              <div id="chartRangeControls" class="chart-range" aria-label="图表交易日范围">
+                <button type="button" data-days="10">10日</button>
+                <button type="button" data-days="20">20日</button>
+                <button type="button" data-days="30" class="active" aria-pressed="true">30日</button>
+                <button type="button" data-days="60">60日</button>
+                <button type="button" data-days="0">全部</button>
+              </div>
+            </div>
+            <div class="chart-legend"><span class="axis-hint">左轴 · 资金净额</span><span class="legend-price">收盘价</span><span class="legend-buy">净流入</span><span class="legend-sell">净流出</span><span class="axis-hint">右轴 · 收盘价</span></div>
+            <canvas id="flowChart" width="920" height="390" aria-label="每日资金净流入和收盘价双坐标图" title="移动鼠标查看单日数据；滚轮可缩放交易日范围"></canvas>
           </article>
 
           <article class="panel strategy-panel">
