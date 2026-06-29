@@ -361,7 +361,7 @@ git pull
 python scripts/run_personal_alerts.py --dry-run
 ```
 
-脚本默认通过 AKShare 东方财富实时行情读取持仓当前价，判断是否触发手工止盈线、手工止损线，以及 Web 看板刷新后留下的退出类量化信号。首次触发会写入 `web/backend/personal_alert_state.json`，避免 cron 每分钟重复推送；如果需要每次都推送，可加 `--repeat`。
+脚本默认通过 AKShare 东方财富实时行情读取持仓当前价，判断是否触发手工止盈线、手工止损线，以及 Web 看板刷新后留下的退出类量化信号。首次触发会写入 `web/backend/personal_alert_state.json`，避免常驻监控进程重复推送；如果需要每次都推送，可加 `--repeat`。
 
 `.env` 中配置推送渠道：
 
@@ -377,17 +377,29 @@ TRADINGAGENTS_ALERT_WEBHOOK_TYPE=generic
 # 只打印，不发送
 python scripts/run_personal_alerts.py --dry-run
 
-# 真实发送；没有新触发则不推送
+# 单次检查并真实发送；没有新触发则不推送
 python scripts/run_personal_alerts.py
 
-# 只在 A 股交易时段运行，适合 cron 每 1-5 分钟调用
-python scripts/run_personal_alerts.py --market-hours-only
+# 常驻监控；每 30 秒检查一次，只在 A 股交易时段真正拉行情
+python scripts/run_personal_alerts.py --watch --interval 30 --market-hours-only
 ```
 
-Linux cron 示例：
+小龙虾 `systemd` 常驻服务示例：
 
-```cron
-*/5 9-15 * * 1-5 cd /path/to/TradingAgents && /path/to/python scripts/run_personal_alerts.py --market-hours-only >> /tmp/tradingagents_personal_alerts.log 2>&1
+```ini
+[Unit]
+Description=TradingAgents personal price alerts
+After=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/apps/TnT_stock_analysis_with_EQS
+ExecStart=/root/apps/TnT_stock_analysis_with_EQS/.venv/bin/python scripts/run_personal_alerts.py --watch --interval 30 --market-hours-only
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
 ```
 
 实时触价提醒依赖 AKShare/东方财富可访问性；Tushare 仍用于日线、资金流、财务和量化报告。
