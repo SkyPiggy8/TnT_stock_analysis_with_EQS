@@ -71,6 +71,18 @@ class HotspotMonitor:
             raise RuntimeError(f"No open trading date found on or before {target}")
         return open_dates[-1]
 
+    def trading_dates(
+        self,
+        start_date: str | datetime,
+        end_date: str | datetime,
+    ) -> list[str]:
+        """Return exchange-open dates for calendar selection."""
+
+        start, end = _date_key(start_date), _date_key(end_date)
+        if start > end:
+            raise ValueError("start_date must not be after end_date")
+        return self._calendar(start, end)
+
     def _history_dates(self, trade_date: str, count: int | None = None) -> list[str]:
         history_days = int(count or self.config["storage"]["history_days"])
         end = datetime.strptime(trade_date, "%Y%m%d")
@@ -197,6 +209,7 @@ class HotspotMonitor:
         trade_date: str | None = None,
         *,
         force: bool = False,
+        refresh_target: bool = False,
         export_markdown: bool = True,
         export_excel: bool = True,
         progress: ProgressCallback | None = None,
@@ -208,7 +221,11 @@ class HotspotMonitor:
             total = len(dates)
             for index, date in enumerate(dates, 1):
                 self._progress(progress, "download", index, total, f"准备 {date}")
-                self._fetch_date(date, include_block=date == effective, force=force)
+                self._fetch_date(
+                    date,
+                    include_block=date == effective,
+                    force=force or (refresh_target and date == effective),
+                )
             stock_basic, sectors = self._metadata(effective, force=force)
             self._progress(progress, "calculate", 1, 1, "计算全市场信号与行业共振")
             stocks, sector_scores, summary = self._calculate(effective, dates, stock_basic, sectors)

@@ -226,3 +226,9 @@ reports/
 data/hotspot_monitor/
 *.duckdb
 *.duckdb.wal
+
+# Frontend build artifacts
+node_modules/
+web/frontend/node_modules/
+web/frontend/dist/
+web/backend/personal_board.json

@@ -9,7 +9,7 @@ import sys
 import threading
 import time
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -18,7 +18,71 @@ from urllib.parse import parse_qs, unquote, urlparse
 
 ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = ROOT / "web" / "frontend"
+FRONTEND_DIST_DIR = FRONTEND_DIR / "dist"
 REPORTS_DIR = ROOT / "reports"
+PERSONAL_BOARD_PATH = ROOT / "web" / "backend" / "personal_board.json"
+PERSONAL_BOARD_MAX_ITEMS = 200
+
+FUTURE_THEME_KEYWORDS = [
+    "energy",
+    "power",
+    "battery",
+    "semiconductor",
+    "chip",
+    "optical",
+    "robot",
+    "auto",
+    "ev",
+    "smart",
+    "home",
+    "satellite",
+    "rocket",
+    "aerospace",
+    "新能源",
+    "电力",
+    "储能",
+    "半导体",
+    "芯片",
+    "光模块",
+    "机器人",
+    "汽车",
+    "智能",
+    "家居",
+    "低空",
+    "卫星",
+    "火箭",
+    "航天",
+    "军工",
+]
+EXCLUDED_THEME_KEYWORDS = [
+    "房地产",
+    "地产",
+    "白酒",
+    "消费",
+    "医药",
+    "医疗",
+    "st",
+]
+
+DEFAULT_PERSONAL_BOARD = {
+    "holdings": [],
+    "watchlist": [],
+    "rules": {
+        "focus": FUTURE_THEME_KEYWORDS,
+        "avoid": EXCLUDED_THEME_KEYWORDS,
+        "minCircMvYuan": 2_000_000_000,
+        "notes": [
+            "Prefer sector-level value investing with visible future demand.",
+            "Avoid unfamiliar fields, policy/geopolitical shock exposure, hype stocks, and small caps.",
+            "Use hotspot radar only to narrow research scope; single-stock reports still decide entries and exits.",
+        ],
+    },
+    "notification": {
+        "mode": "local_only",
+        "remoteName": "小龙虾",
+        "enabled": False,
+    },
+}
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -26,6 +90,7 @@ if str(ROOT) not in sys.path:
 from tradingagents.dataflows.a_share_quant_strategy import build_quant_strategy_report  # noqa: E402
 from tradingagents.dataflows.tushare_fundamentals import build_fundamental_snapshot  # noqa: E402
 from tradingagents.hotspot_monitor import HotspotMonitor, load_hotspot_config  # noqa: E402
+from web.backend.hotspot_export import render_hotspot_export  # noqa: E402
 
 
 _FUNDAMENTAL_CACHE: dict[tuple[str, str], tuple[float, dict]] = {}
@@ -66,7 +131,7 @@ def _hotspot_job_snapshot(job_id: str) -> dict:
         return dict(_HOTSPOT_JOBS[job_id])
 
 
-def _start_hotspot_job(trade_date: str | None) -> dict:
+def _start_hotspot_job(trade_date: str | None, *, refresh_target: bool = True) -> dict:
     job_id = uuid.uuid4().hex
     job = {
         "jobId": job_id,
@@ -108,7 +173,11 @@ def _start_hotspot_job(trade_date: str | None) -> dict:
                 )
 
         try:
-            result = _get_hotspot_monitor().scan(trade_date, progress=progress)
+            result = _get_hotspot_monitor().scan(
+                trade_date,
+                refresh_target=refresh_target,
+                progress=progress,
+            )
             with _HOTSPOT_JOBS_LOCK:
                 _HOTSPOT_JOBS[job_id].update(
                     status="complete",
@@ -142,6 +211,21 @@ def _json_response(handler: BaseHTTPRequestHandler, payload: dict, status: int =
     handler.wfile.write(body)
 
 
+def _html_download_response(
+    handler: BaseHTTPRequestHandler,
+    html: str,
+    filename: str,
+) -> None:
+    body = html.encode("utf-8")
+    handler.send_response(HTTPStatus.OK)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Disposition", f'attachment; filename="{filename}"')
+    handler.send_header("Cache-Control", "no-store")
+    handler.send_header("Content-Length", str(len(body)))
+    handler.end_headers()
+    handler.wfile.write(body)
+
+
 def _read_json_body(handler: BaseHTTPRequestHandler, max_bytes: int = 65_536) -> dict:
     length = int(handler.headers.get("Content-Length", "0") or 0)
     if length > max_bytes:
@@ -151,6 +235,286 @@ def _read_json_body(handler: BaseHTTPRequestHandler, max_bytes: int = 65_536) ->
     payload = json.loads(handler.rfile.read(length).decode("utf-8"))
     if not isinstance(payload, dict):
         raise ValueError("JSON body must be an object")
+    return payload
+
+
+def _clone_default_board() -> dict:
+    return json.loads(json.dumps(DEFAULT_PERSONAL_BOARD, ensure_ascii=False))
+
+
+def _ticker_key(value: str | None) -> str:
+    return re.sub(r"[^0-9A-Za-z.]", "", str(value or "").upper())
+
+
+def _number(value: object) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        match = re.search(r"-?\d+(?:\.\d+)?", str(value).replace(",", ""))
+        return float(match.group(0)) if match else None
+
+
+def _board_item(raw: object, allowed: set[str]) -> dict:
+    if not isinstance(raw, dict):
+        return {}
+    item = {key: raw.get(key) for key in allowed if raw.get(key) not in (None, "")}
+    item["id"] = str(item.get("id") or uuid.uuid4().hex[:12])
+    if "ticker" in item:
+        item["ticker"] = _ticker_key(str(item["ticker"]))
+    for key in ("shares", "costPrice", "takeProfit", "stopLoss", "targetPrice"):
+        if key in item:
+            parsed = _number(item.get(key))
+            if parsed is None:
+                item.pop(key, None)
+            else:
+                item[key] = parsed
+    return item
+
+
+def _clean_personal_board(payload: dict) -> dict:
+    board = _clone_default_board()
+    holding_fields = {
+        "id",
+        "ticker",
+        "name",
+        "shares",
+        "costPrice",
+        "takeProfit",
+        "stopLoss",
+        "reportId",
+        "thesis",
+        "note",
+        "createdAt",
+        "updatedAt",
+        "monitor",
+    }
+    watch_fields = {
+        "id",
+        "ticker",
+        "name",
+        "theme",
+        "targetPrice",
+        "reason",
+        "note",
+        "createdAt",
+        "updatedAt",
+    }
+    holdings = [_board_item(item, holding_fields) for item in payload.get("holdings", [])[:PERSONAL_BOARD_MAX_ITEMS]]
+    watchlist = [_board_item(item, watch_fields) for item in payload.get("watchlist", [])[:PERSONAL_BOARD_MAX_ITEMS]]
+    board["holdings"] = [item for item in holdings if item.get("ticker")]
+    board["watchlist"] = [item for item in watchlist if item.get("ticker")]
+    if isinstance(payload.get("notification"), dict):
+        board["notification"].update(
+            {
+                key: payload["notification"][key]
+                for key in ("mode", "remoteName", "enabled")
+                if key in payload["notification"]
+            }
+        )
+    return board
+
+
+def _load_personal_board() -> dict:
+    if not PERSONAL_BOARD_PATH.exists():
+        return _clone_default_board()
+    try:
+        payload = json.loads(PERSONAL_BOARD_PATH.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"personal board JSON is invalid: {PERSONAL_BOARD_PATH}") from exc
+    if not isinstance(payload, dict):
+        raise ValueError("personal board JSON must be an object")
+    return _clean_personal_board(payload)
+
+
+def _save_personal_board(payload: dict) -> dict:
+    board = _clean_personal_board(payload)
+    PERSONAL_BOARD_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PERSONAL_BOARD_PATH.write_text(
+        json.dumps(board, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    return board
+
+
+def _latest_reports_by_ticker() -> dict[str, dict]:
+    result: dict[str, dict] = {}
+    for report in _list_reports():
+        ticker = _ticker_key(report.get("ticker"))
+        if ticker and ticker not in result:
+            result[ticker] = report
+    return result
+
+
+def _stock_blob(row: dict) -> str:
+    return " ".join(
+        str(row.get(key) or "")
+        for key in ("name", "ts_code", "industry", "sector_level_1", "sector_level_2", "concept_tags", "risk_flags")
+    ).lower()
+
+
+def _matches_any(text: str, keywords: list[str]) -> bool:
+    return any(keyword.lower() in text for keyword in keywords)
+
+
+def _latest_hotspot_payload() -> dict:
+    try:
+        return _get_hotspot_monitor().load_result(None)
+    except Exception:
+        return {"tradeDate": "", "summary": {}, "sectors": [], "stocks": [], "blockTrades": [], "moneyflowTop": []}
+
+
+def _hotspot_rows_by_ticker(payload: dict) -> dict[str, dict]:
+    rows: dict[str, dict] = {}
+    for bucket in ("stocks", "moneyflowTop", "blockTrades"):
+        for row in payload.get(bucket, []) or []:
+            ticker = _ticker_key(row.get("ts_code"))
+            if ticker and ticker not in rows:
+                rows[ticker] = row
+    return rows
+
+
+def _hotspot_candidates(payload: dict) -> list[dict]:
+    unique: dict[str, dict] = {}
+    for bucket in ("stocks", "moneyflowTop", "blockTrades"):
+        for row in payload.get(bucket, []) or []:
+            ticker = _ticker_key(row.get("ts_code"))
+            if not ticker or ticker in unique:
+                continue
+            text = _stock_blob(row)
+            circ_mv = _number(row.get("circ_mv_yuan"))
+            if _matches_any(text, EXCLUDED_THEME_KEYWORDS):
+                continue
+            if circ_mv is not None and circ_mv < DEFAULT_PERSONAL_BOARD["rules"]["minCircMvYuan"]:
+                continue
+            if not _matches_any(text, FUTURE_THEME_KEYWORDS):
+                continue
+            unique[ticker] = {
+                "ticker": ticker,
+                "name": row.get("name") or ticker,
+                "theme": row.get("sector_level_1") or row.get("industry") or "",
+                "stockScore": row.get("stock_score"),
+                "netFlowRatio": row.get("net_flow_ratio"),
+                "bigOrderRatio": row.get("big_elg_flow_ratio"),
+                "amountRatio20": row.get("amount_ratio_20"),
+                "reason": "hotspot_match",
+            }
+    return sorted(unique.values(), key=lambda item: _number(item.get("stockScore")) or 0, reverse=True)[:24]
+
+
+def _holding_alerts(item: dict, report: dict | None) -> list[dict]:
+    alerts = []
+    monitor = item.get("monitor") if isinstance(item.get("monitor"), dict) else {}
+    latest_price = _number(monitor.get("latestPrice"))
+    take_profit = _number(item.get("takeProfit"))
+    stop_loss = _number(item.get("stopLoss"))
+    if not report:
+        alerts.append({"level": "warn", "code": "NO_REPORT", "message": "No TradingAgents report is bound to this holding."})
+    if latest_price is None:
+        alerts.append({"level": "info", "code": "NO_PRICE", "message": "No refreshed price snapshot yet."})
+        return alerts
+    if take_profit is not None and latest_price >= take_profit:
+        alerts.append({"level": "success", "code": "TAKE_PROFIT", "message": "Latest price reached the manual take-profit line."})
+    if stop_loss is not None and latest_price <= stop_loss:
+        alerts.append({"level": "danger", "code": "STOP_LOSS", "message": "Latest price reached the manual stop-loss line."})
+    signal = str(monitor.get("signal") or "").upper()
+    if signal in {"REDUCE_OR_EXIT", "SELL_TAKE_PROFIT", "EXPIRED"}:
+        alerts.append({"level": "danger", "code": signal, "message": "The refreshed quant report is in an exit-oriented state."})
+    return alerts
+
+
+def _personal_board_payload(board: dict | None = None) -> dict:
+    board = board or _load_personal_board()
+    reports_by_ticker = _latest_reports_by_ticker()
+    hotspot_payload = _latest_hotspot_payload()
+    hotspot_rows = _hotspot_rows_by_ticker(hotspot_payload)
+
+    holdings = []
+    for item in board["holdings"]:
+        ticker = _ticker_key(item.get("ticker"))
+        report = reports_by_ticker.get(ticker)
+        hotspot = hotspot_rows.get(ticker)
+        latest_price = _number((item.get("monitor") or {}).get("latestPrice"))
+        cost_price = _number(item.get("costPrice"))
+        shares = _number(item.get("shares")) or 0
+        pnl = (latest_price - cost_price) * shares if latest_price is not None and cost_price is not None else None
+        pnl_pct = (latest_price / cost_price - 1) * 100 if latest_price is not None and cost_price else None
+        holdings.append(
+            {
+                **item,
+                "hasReport": bool(report),
+                "latestReport": report,
+                "hotspot": hotspot,
+                "pnl": pnl,
+                "pnlPct": pnl_pct,
+                "alerts": _holding_alerts(item, report),
+            }
+        )
+
+    watchlist = []
+    for item in board["watchlist"]:
+        ticker = _ticker_key(item.get("ticker"))
+        report = reports_by_ticker.get(ticker)
+        hotspot = hotspot_rows.get(ticker)
+        watchlist.append(
+            {
+                **item,
+                "hasReport": bool(report),
+                "latestReport": report,
+                "hotspot": hotspot,
+                "hotspotScore": hotspot.get("stock_score") if hotspot else None,
+                "hotspotDate": hotspot_payload.get("tradeDate") if hotspot else "",
+            }
+        )
+
+    return {
+        **board,
+        "holdings": holdings,
+        "watchlist": watchlist,
+        "hotspotDate": hotspot_payload.get("tradeDate", ""),
+        "hotspotCandidates": _hotspot_candidates(hotspot_payload),
+        "reports": list(reports_by_ticker.values()),
+        "updatedAt": datetime.now().isoformat(timespec="seconds"),
+        "storagePath": str(PERSONAL_BOARD_PATH),
+    }
+
+
+def _refresh_personal_board() -> dict:
+    board = _load_personal_board()
+    today = datetime.now().strftime("%Y-%m-%d")
+    refreshed = []
+    for item in board["holdings"]:
+        ticker = _ticker_key(item.get("ticker"))
+        monitor = dict(item.get("monitor") or {})
+        try:
+            quant = _quant_payload(ticker, today)
+            summary = quant.get("summary", {})
+            monitor.update(
+                {
+                    "latestPrice": _number(summary.get("latestClose")),
+                    "latestDate": summary.get("latestFlowDate") or today,
+                    "signal": summary.get("signal") or "UNKNOWN",
+                    "takeProfit": summary.get("takeProfit"),
+                    "riskExit": summary.get("riskExit"),
+                    "currentExit": summary.get("currentExit"),
+                    "refreshedAt": quant.get("generatedAt"),
+                    "error": "",
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - diagnostic refresh endpoint
+            monitor.update(
+                {
+                    "refreshedAt": datetime.now().isoformat(timespec="seconds"),
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
+        item["monitor"] = monitor
+        item["updatedAt"] = datetime.now().isoformat(timespec="seconds")
+        refreshed.append(ticker)
+    saved = _save_personal_board(board)
+    payload = _personal_board_payload(saved)
+    payload["refreshed"] = refreshed
     return payload
 
 
@@ -407,13 +771,28 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 return _json_response(self, {"ok": True, "reportsDir": str(REPORTS_DIR)})
             if path == "/api/reports":
                 return _json_response(self, {"reports": _list_reports()})
+            if path.startswith("/api/personal-board"):
+                return _json_response(self, _personal_board_payload())
             if path == "/api/hotspots/dates":
-                store = _get_hotspot_monitor().store
+                monitor = _get_hotspot_monitor()
+                store = monitor.store
+                local_dates = store.available_raw_dates()
+                scanned_dates = store.available_dates()
+                try:
+                    calendar_end = datetime.now()
+                    calendar_start = calendar_end - timedelta(days=400)
+                    trade_dates = monitor.trading_dates(calendar_start, calendar_end)
+                    latest_trade_date = trade_dates[-1] if trade_dates else ""
+                except Exception:  # Keep historical reports usable while the vendor is unavailable.
+                    trade_dates = sorted(set(local_dates + scanned_dates))
+                    latest_trade_date = (scanned_dates or local_dates or [""])[0]
                 return _json_response(
                     self,
                     {
-                        "dates": store.available_raw_dates(),
-                        "scannedDates": store.available_dates(),
+                        "dates": local_dates,
+                        "scannedDates": scanned_dates,
+                        "tradeDates": trade_dates,
+                        "latestTradeDate": latest_trade_date,
                     },
                 )
             if path.startswith("/api/hotspots/jobs/"):
@@ -422,6 +801,17 @@ class DashboardHandler(BaseHTTPRequestHandler):
             if path == "/api/hotspots":
                 trade_date = (query.get("date") or [""])[0] or None
                 return _json_response(self, _get_hotspot_monitor().load_result(trade_date))
+            if path == "/api/hotspots/export":
+                trade_date = (query.get("date") or [""])[0] or None
+                payload = _get_hotspot_monitor().load_result(trade_date)
+                if not payload.get("tradeDate"):
+                    raise FileNotFoundError(trade_date or "latest")
+                filename = f'a-share-hotspot-{payload["tradeDate"]}.html'
+                return _html_download_response(
+                    self,
+                    render_hotspot_export(payload),
+                    filename,
+                )
             if path.startswith("/api/reports/"):
                 report_id = path.removeprefix("/api/reports/")
                 return _json_response(self, _report_payload(report_id))
@@ -446,12 +836,23 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         try:
+            if parsed.path == "/api/personal-board":
+                payload = _read_json_body(self)
+                return _json_response(self, _personal_board_payload(_save_personal_board(payload)))
+            if parsed.path == "/api/personal-board/refresh":
+                return _json_response(self, _refresh_personal_board())
             if parsed.path == "/api/hotspots/scan":
                 payload = _read_json_body(self)
                 trade_date = payload.get("tradeDate") or None
                 if trade_date and not re.fullmatch(r"\d{4}-?\d{2}-?\d{2}", str(trade_date)):
                     raise ValueError("tradeDate must be YYYYMMDD or YYYY-MM-DD")
-                job = _start_hotspot_job(str(trade_date) if trade_date else None)
+                refresh_target = payload.get("refreshTarget", True)
+                if not isinstance(refresh_target, bool):
+                    raise ValueError("refreshTarget must be a boolean")
+                job = _start_hotspot_job(
+                    str(trade_date) if trade_date else None,
+                    refresh_target=refresh_target,
+                )
                 status = HTTPStatus.CONFLICT if job.get("alreadyRunning") else HTTPStatus.ACCEPTED
                 return _json_response(self, job, status)
             return _json_response(self, {"error": "not_found"}, HTTPStatus.NOT_FOUND)
@@ -472,13 +873,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
         print("[%s] %s" % (self.log_date_time_string(), fmt % args))
 
     def _serve_static(self, path: str) -> None:
+        static_root = FRONTEND_DIST_DIR if (FRONTEND_DIST_DIR / "index.html").exists() else FRONTEND_DIR
         rel = "index.html" if path in ("", "/") else path.lstrip("/")
-        target = (FRONTEND_DIR / rel).resolve()
-        if FRONTEND_DIR.resolve() not in target.parents and target != FRONTEND_DIR.resolve():
+        target = (static_root / rel).resolve()
+        if static_root.resolve() not in target.parents and target != static_root.resolve():
             self.send_error(HTTPStatus.FORBIDDEN)
             return
         if not target.exists() or not target.is_file():
-            target = FRONTEND_DIR / "index.html"
+            target = static_root / "index.html"
         body = target.read_bytes()
         content_type = mimetypes.guess_type(str(target))[0] or "application/octet-stream"
         self.send_response(HTTPStatus.OK)

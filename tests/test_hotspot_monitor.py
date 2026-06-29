@@ -290,6 +290,7 @@ def test_daily_scan_is_batch_cached_and_idempotent(tmp_path):
     config["signals"]["technical"].update({"ma_windows": [2, 3, 5], "volume_window": 5})
     fake = FakeBatchClient()
     monitor = HotspotMonitor(config, client=fake, store=HotspotStore(config))
+    assert monitor.trading_dates(dates[-2], dates[-1]) == dates[-2:]
     first = monitor.scan(dates[-1])
     calls_after_first = fake.calls.copy()
     second = monitor.scan(dates[-1])
@@ -302,6 +303,12 @@ def test_daily_scan_is_batch_cached_and_idempotent(tmp_path):
     assert fake.calls == calls_after_first
     assert fake.calls["daily"] == 20
     assert fake.calls["block_trade"] == 1
+
+    monitor.scan(dates[-1], refresh_target=True)
+    assert fake.calls["daily"] == calls_after_first["daily"] + 1
+    assert fake.calls["daily_basic"] == calls_after_first["daily_basic"] + 1
+    assert fake.calls["moneyflow"] == calls_after_first["moneyflow"] + 1
+    assert fake.calls["block_trade"] == calls_after_first["block_trade"] + 1
 
 
 @pytest.mark.unit
