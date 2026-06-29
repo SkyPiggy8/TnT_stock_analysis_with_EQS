@@ -232,3 +232,4 @@ node_modules/
 web/frontend/node_modules/
 web/frontend/dist/
 web/backend/personal_board.json
+web/backend/personal_alert_state.json

@@ -350,6 +350,48 @@ Web 看板把“单股量化”和“A股热点”拆分为两个独立工作区
 
 热点评分由资金流、大单/特大单、大宗交易、成交额与流动性、技术面和板块共振组成。它只用于缩小研究范围，不代表买入建议，也不会产生真实订单。
 
+## 个人持仓价格提醒
+
+Web 看板中的 **持仓 / 股票池** 会把个人持仓保存到 `web/backend/personal_board.json`。该文件包含仓位、成本价、止盈线和止损线，已被 `.gitignore` 忽略，不应提交到 GitHub。
+
+小龙虾服务器拉取最新代码后，可以独立运行价格提醒脚本，不要求 Web 服务常驻：
+
+```bash
+git pull
+python scripts/run_personal_alerts.py --dry-run
+```
+
+脚本默认通过 AKShare 东方财富实时行情读取持仓当前价，判断是否触发手工止盈线、手工止损线，以及 Web 看板刷新后留下的退出类量化信号。首次触发会写入 `web/backend/personal_alert_state.json`，避免 cron 每分钟重复推送；如果需要每次都推送，可加 `--repeat`。
+
+`.env` 中配置推送渠道：
+
+```dotenv
+# generic: POST JSON; serverchan: Server酱 title/desp; wecom: 企业微信机器人 markdown
+TRADINGAGENTS_ALERT_WEBHOOK_URL=https://example.com/webhook
+TRADINGAGENTS_ALERT_WEBHOOK_TYPE=generic
+```
+
+常用命令：
+
+```bash
+# 只打印，不发送
+python scripts/run_personal_alerts.py --dry-run
+
+# 真实发送；没有新触发则不推送
+python scripts/run_personal_alerts.py
+
+# 只在 A 股交易时段运行，适合 cron 每 1-5 分钟调用
+python scripts/run_personal_alerts.py --market-hours-only
+```
+
+Linux cron 示例：
+
+```cron
+*/5 9-15 * * 1-5 cd /path/to/TradingAgents && /path/to/python scripts/run_personal_alerts.py --market-hours-only >> /tmp/tradingagents_personal_alerts.log 2>&1
+```
+
+实时触价提醒依赖 AKShare/东方财富可访问性；Tushare 仍用于日线、资金流、财务和量化报告。
+
 ## 常见问题
 
 ### Web 页面没有历史报告
