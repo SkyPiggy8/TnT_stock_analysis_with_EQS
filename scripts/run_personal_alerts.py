@@ -45,6 +45,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--market-hours-only", action="store_true", help="Skip outside A-share trading windows.")
     parser.add_argument("--watch", action="store_true", help="Keep polling quotes and send alerts when thresholds are hit.")
     parser.add_argument("--interval", type=int, default=60, help="Polling interval in seconds for --watch.")
+    parser.add_argument("--include-quant-signals", action="store_true", help="Also alert on exit-oriented quant signals.")
     parser.add_argument("--json", action="store_true", help="Print machine-readable summary.")
     return parser.parse_args()
 
@@ -59,7 +60,7 @@ def run_once(args: argparse.Namespace, webhook_url: str, webhook_type: str) -> t
         quotes = load_akshare_quotes()
         state = load_state(args.state)
         next_state = copy.deepcopy(state)
-        alerts = build_alerts(board, quotes)
+        alerts = build_alerts(board, quotes, include_quant_signals=args.include_quant_signals)
         new_alerts = filter_new_alerts(alerts, next_state, repeat=args.repeat)
     except PersonalAlertError as exc:
         return 2, {"status": "failed", "error": str(exc)}

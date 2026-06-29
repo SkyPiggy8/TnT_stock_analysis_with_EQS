@@ -36,6 +36,27 @@ def test_build_alerts_triggers_take_profit_and_stop_loss():
     assert alerts[1].ticker == "000725.SZ"
 
 
+def test_quant_exit_signal_is_opt_in_for_personal_alerts():
+    board = {
+        "holdings": [
+            {
+                "ticker": "000966.SZ",
+                "name": "CY Power",
+                "takeProfit": 4.8,
+                "stopLoss": 3.9,
+                "monitor": {"signal": "REDUCE_OR_EXIT"},
+            }
+        ]
+    }
+    quotes = {
+        "000966": Quote(ticker="000966.SZ", code="000966", name="CY Power", price=3.96),
+    }
+
+    assert build_alerts(board, quotes) == []
+    alerts = build_alerts(board, quotes, include_quant_signals=True)
+    assert [alert.code for alert in alerts] == ["REDUCE_OR_EXIT"]
+
+
 def test_filter_new_alerts_suppresses_repeated_active_alerts():
     alert = Alert(
         key="000966.SZ:TAKE_PROFIT:4.800",

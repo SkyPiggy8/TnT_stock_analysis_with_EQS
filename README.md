@@ -361,7 +361,7 @@ git pull
 python scripts/run_personal_alerts.py --dry-run
 ```
 
-脚本默认通过 AKShare 东方财富实时行情读取持仓当前价，判断是否触发手工止盈线、手工止损线，以及 Web 看板刷新后留下的退出类量化信号。首次触发会写入 `web/backend/personal_alert_state.json`，避免常驻监控进程重复推送；如果需要每次都推送，可加 `--repeat`。
+脚本默认通过 AKShare 东方财富实时行情读取持仓当前价，只判断是否触发手工止盈线、手工止损线。首次触发会写入 `web/backend/personal_alert_state.json`，避免常驻监控进程重复推送；如果需要每次都推送，可加 `--repeat`。如果希望同时把 Web 看板刷新后留下的退出类量化信号也发微信，可加 `--include-quant-signals`。
 
 `.env` 中配置推送渠道：
 
@@ -382,6 +382,9 @@ python scripts/run_personal_alerts.py
 
 # 常驻监控；每 30 秒检查一次，只在 A 股交易时段真正拉行情
 python scripts/run_personal_alerts.py --watch --interval 30 --market-hours-only
+
+# 可选：也把 REDUCE_OR_EXIT / SELL_TAKE_PROFIT / EXPIRED 等量化退出信号推送
+python scripts/run_personal_alerts.py --watch --interval 30 --market-hours-only --include-quant-signals
 ```
 
 小龙虾 `systemd` 常驻服务示例：

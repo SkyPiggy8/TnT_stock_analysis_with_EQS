@@ -154,7 +154,12 @@ def load_akshare_quotes() -> dict[str, Quote]:
     return quotes
 
 
-def evaluate_holding(holding: dict[str, Any], quote: Quote | None) -> list[Alert]:
+def evaluate_holding(
+    holding: dict[str, Any],
+    quote: Quote | None,
+    *,
+    include_quant_signals: bool = False,
+) -> list[Alert]:
     ticker = normalize_ticker(str(holding.get("ticker") or holding.get("name") or ""))
     code = ticker_code(ticker)
     name = str(holding.get("name") or quote.name if quote else holding.get("name") or ticker)
@@ -204,7 +209,7 @@ def evaluate_holding(holding: dict[str, Any], quote: Quote | None) -> list[Alert
                 message=f"{ticker} {name} reached stop-loss line {stop_loss:.2f}; latest {quote.price:.2f}.",
             )
         )
-    if signal in EXIT_SIGNALS:
+    if include_quant_signals and signal in EXIT_SIGNALS:
         alerts.append(
             Alert(
                 key=f"{ticker}:QUANT_SIGNAL:{signal}",
@@ -241,7 +246,12 @@ def filter_new_alerts(alerts: list[Alert], state: dict[str, Any], repeat: bool =
     return new_alerts
 
 
-def build_alerts(board: dict[str, Any], quotes: dict[str, Quote]) -> list[Alert]:
+def build_alerts(
+    board: dict[str, Any],
+    quotes: dict[str, Quote],
+    *,
+    include_quant_signals: bool = False,
+) -> list[Alert]:
     alerts: list[Alert] = []
     for holding in board.get("holdings", []):
         if not isinstance(holding, dict):
@@ -250,7 +260,13 @@ def build_alerts(board: dict[str, Any], quotes: dict[str, Quote]) -> list[Alert]
             code = ticker_code(str(holding.get("ticker") or holding.get("name") or ""))
         except PersonalAlertError:
             continue
-        alerts.extend(evaluate_holding(holding, quotes.get(code)))
+        alerts.extend(
+            evaluate_holding(
+                holding,
+                quotes.get(code),
+                include_quant_signals=include_quant_signals,
+            )
+        )
     return alerts
 
 
@@ -291,4 +307,3 @@ def send_webhook(title: str, content: str, url: str, webhook_type: str = "generi
         )
     response.raise_for_status()
     return response
-
